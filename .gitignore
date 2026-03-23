@@ -1,0 +1,6 @@
+venv
+wandb
+results
+*.h5
+*ckpt
+__pycache__
