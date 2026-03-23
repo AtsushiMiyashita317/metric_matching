@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-bias-variance", type=float, default=1e-3)
     parser.add_argument("--epsilon-min", type=float, default=1e-4)
     parser.add_argument("--epsilon-max", type=float, default=5e-2)
+    parser.add_argument("--copies-per-sample", type=int, default=1)
     parser.add_argument("--tikhonov-lambda", type=float, default=1e-4)
     parser.add_argument("--preview-fields", type=int, default=8)
     parser.add_argument("--preview-samples", type=int, default=4)
@@ -94,6 +95,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
         epsilon_min=args.epsilon_min,
         epsilon_max=args.epsilon_max,
+        copies_per_sample=args.copies_per_sample,
         tikhonov_lambda=args.tikhonov_lambda,
         preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,

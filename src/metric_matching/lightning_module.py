@@ -23,6 +23,7 @@ class MetricMatchingConfig:
     weight_decay: float = 0.0
     epsilon_min: float = 1e-4
     epsilon_max: float = 5e-2
+    copies_per_sample: int = 1
     tikhonov_lambda: float = 1e-4
     preview_fields: int = 8
     preview_samples: int = 4
@@ -35,6 +36,8 @@ class MetricMatchingModule(L.LightningModule):
     def __init__(self, config: MetricMatchingConfig) -> None:
         super().__init__()
         self.config = config
+        if self.config.copies_per_sample < 1:
+            raise ValueError(f"copies_per_sample must be at least 1, got {self.config.copies_per_sample}")
         self.save_hyperparameters(asdict(config))
         self.network = MetricFactorNetwork(
             in_channels=config.image_channels,
@@ -59,6 +62,9 @@ class MetricMatchingModule(L.LightningModule):
         return torch.exp(torch.rand(batch_size, device=device) * (eps_max - eps_min) + eps_min)
 
     def compute_low_rank_loss(self, images: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.config.copies_per_sample > 1:
+            images = images.repeat_interleave(self.config.copies_per_sample, dim=0)
+
         batch_size = images.shape[0]
         epsilon = self.sample_epsilon(batch_size, images.device)
         noise = torch.randn_like(images) * epsilon.sqrt()[:, None, None, None]
@@ -95,6 +101,7 @@ class MetricMatchingModule(L.LightningModule):
             "reg_term": reg_term.mean().detach(),
             "tangent_dim": tangent_dim.mean().detach(),
             "epsilon_mean": epsilon.mean().detach(),
+            "effective_batch_size": torch.tensor(float(batch_size), device=images.device),
             "target_delta_norm": target_norm.detach(),
             "factor_norm": factor_norm.detach(),
             "rank": torch.tensor(float(rank), device=images.device),
