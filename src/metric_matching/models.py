@@ -571,6 +571,6 @@ class MetricFactorNetwork(nn.Module):
         out = self.unet(image, th.log(epsilon.clamp_min(1e-8)))
         batch_size, _, height, width = out.shape
         out = out.view(batch_size, self.rank + 1, self.in_channels, height, width)
-        metric_factors = out[:, : self.rank]
-        score = out[:, self.rank] * (self.in_channels * height * width) ** 0.5
+        metric_factors = out[:, : self.rank] / (self.in_channels * height * width) ** 0.5
+        score = out[:, self.rank]
         return metric_factors, score
