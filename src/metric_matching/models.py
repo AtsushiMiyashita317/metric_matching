@@ -569,5 +569,5 @@ class MetricFactorNetwork(nn.Module):
         batch_size, _, height, width = out.shape
         out = out.view(batch_size, self.rank + 1, self.in_channels, height, width)
         metric_factors = out[:, : self.rank]
-        score = out[:, self.rank]
+        score = out[:, self.rank] * (self.in_channels * height * width) ** 0.5
         return metric_factors, score
