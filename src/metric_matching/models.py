@@ -330,7 +330,7 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         use_output_bias=True,
-        output_bias_variance=1e-3,
+        output_bias_variance=1.0,
     ):
         super().__init__()
         if num_heads_upsample == -1:
@@ -492,13 +492,6 @@ class UNetModel(nn.Module):
         out_conv = conv_nd(dims, input_ch, out_channels, 3, padding=1)
         if use_output_bias:
             zero_module(out_conv)
-        else:
-            # Without an explicit output bias, a zero-initialized head traps the
-            # metric basis at the zero solution because the metric loss has no
-            # first-order gradient there.
-            nn.init.normal_(out_conv.weight, mean=0.0, std=math.sqrt(output_bias_variance))
-            if out_conv.bias is not None:
-                nn.init.zeros_(out_conv.bias)
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),

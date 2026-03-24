@@ -26,6 +26,7 @@ class MetricMatchingConfig:
     copies_per_sample: int = 1
     tikhonov_lambda: float = 1e-4
     score_matching_weight: float = 1.0
+    detach_score_in_metric_loss: bool = False
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -75,6 +76,7 @@ class MetricMatchingModule(L.LightningModule):
 
         metric_flat = metric_basis.flatten(start_dim=2)
         score_flat = score.flatten(start_dim=1)
+        metric_loss_score_flat = score_flat.detach() if self.config.detach_score_in_metric_loss else score_flat
         delta_flat = delta.flatten(start_dim=1)
         factor_rank = self.config.rank
         basis_rank = metric_flat.shape[1]
@@ -83,22 +85,22 @@ class MetricMatchingModule(L.LightningModule):
 
         metric_gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
         metric_frob = metric_gram.square().sum(dim=(1, 2)) / normalization
-        score_gram = score_flat.square().sum(dim=1)
+        score_gram = metric_loss_score_flat.square().sum(dim=1)
         score_frob = score_gram.square() / normalization
-        metric_score_dot = torch.matmul(metric_flat, score_flat[:, :, None]).squeeze(2)
+        metric_score_dot = torch.matmul(metric_flat, metric_loss_score_flat[:, :, None]).squeeze(2)
         metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
         frob_term = metric_frob + score_frob + metric_score
 
         metric_delta_dot = torch.matmul(metric_flat, delta_flat[:, :, None]).squeeze(2)
         metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / (epsilon * normalization)
-        score_delta_dot = (score_flat * delta_flat).sum(dim=1)
+        score_delta_dot = (metric_loss_score_flat * delta_flat).sum(dim=1)
         score_delta = 2 * score_delta_dot.square() / (epsilon * normalization)
         alignment_term = metric_delta + score_delta
 
         target_sq_norm = delta_flat.square().sum(dim=1)
         target_term = target_sq_norm.square() / (epsilon.square() * normalization)
         tangent_dim = metric_flat.square().sum(dim=(1, 2))
-        score_norm = score_flat.square().sum(dim=1)
+        score_norm = metric_loss_score_flat.square().sum(dim=1)
         reg_term = self.config.tikhonov_lambda * 2.0 * (tangent_dim + score_norm) / normalization
         predicted_score = score_flat
         target_score = delta_flat / epsilon.sqrt()[:, None]

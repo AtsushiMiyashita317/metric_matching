@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copies-per-sample", type=int, default=1)
     parser.add_argument("--tikhonov-lambda", type=float, default=1e-4)
     parser.add_argument("--score-matching-weight", type=float, default=1.0)
+    parser.add_argument("--detach-score-in-metric-loss", action="store_true")
     parser.add_argument("--preview-fields", type=int, default=8)
     parser.add_argument("--preview-samples", type=int, default=4)
     parser.add_argument("--preview-steps", type=int, default=7)
@@ -99,6 +100,7 @@ def main() -> None:
         copies_per_sample=args.copies_per_sample,
         tikhonov_lambda=args.tikhonov_lambda,
         score_matching_weight=args.score_matching_weight,
+        detach_score_in_metric_loss=args.detach_score_in_metric_loss,
         preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,
         preview_steps=args.preview_steps,
