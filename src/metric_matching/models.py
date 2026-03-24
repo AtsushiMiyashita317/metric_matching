@@ -489,10 +489,20 @@ class UNetModel(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
+        out_conv = conv_nd(dims, input_ch, out_channels, 3, padding=1)
+        if use_output_bias:
+            zero_module(out_conv)
+        else:
+            # Without an explicit output bias, a zero-initialized head traps the
+            # metric basis at the zero solution because the metric loss has no
+            # first-order gradient there.
+            nn.init.normal_(out_conv.weight, mean=0.0, std=math.sqrt(output_bias_variance))
+            if out_conv.bias is not None:
+                nn.init.zeros_(out_conv.bias)
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
+            out_conv,
         )
         if use_output_bias:
             bias_std = math.sqrt(output_bias_variance)
