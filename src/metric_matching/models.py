@@ -545,7 +545,7 @@ class MetricFactorNetwork(nn.Module):
             image_size=64,
             in_channels=in_channels,
             model_channels=base_channels,
-            out_channels=in_channels * rank,
+            out_channels=in_channels * (rank + 1),
             num_res_blocks=num_res_blocks,
             attention_resolutions={attention_downsample_factor},
             dropout=0.0,
@@ -564,7 +564,10 @@ class MetricFactorNetwork(nn.Module):
             output_bias_variance=output_bias_variance,
         )
 
-    def forward(self, image: th.Tensor, epsilon: th.Tensor) -> th.Tensor:
+    def forward(self, image: th.Tensor, epsilon: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
         out = self.unet(image, th.log(epsilon.clamp_min(1e-8)))
         batch_size, _, height, width = out.shape
-        return out.view(batch_size, self.rank, self.in_channels, height, width)
+        out = out.view(batch_size, self.rank + 1, self.in_channels, height, width)
+        metric_factors = out[:, : self.rank]
+        score = out[:, self.rank]
+        return metric_factors, score

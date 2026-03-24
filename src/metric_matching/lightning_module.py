@@ -25,6 +25,7 @@ class MetricMatchingConfig:
     epsilon_max: float = 5e-2
     copies_per_sample: int = 1
     tikhonov_lambda: float = 1e-4
+    score_matching_weight: float = 1.0
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -53,7 +54,7 @@ class MetricMatchingModule(L.LightningModule):
             torch.full((2,), 1e-2),
         )
 
-    def forward(self, image: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, epsilon: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.network(image, epsilon)
 
     def sample_epsilon(self, batch_size: int, device: torch.device) -> torch.Tensor:
@@ -70,41 +71,62 @@ class MetricMatchingModule(L.LightningModule):
         noise = torch.randn_like(images) * epsilon.sqrt()[:, None, None, None]
         noisy_images = images + noise
         delta = images - noisy_images
+        metric_basis, score = self.forward(noisy_images, epsilon)
 
-        metric_factors = self(noisy_images, epsilon)
-        metric_flat = metric_factors.flatten(start_dim=2)
+        metric_flat = metric_basis.flatten(start_dim=2)
+        score_flat = score.flatten(start_dim=1)
         delta_flat = delta.flatten(start_dim=1)
-        rank = metric_flat.shape[1]
+        factor_rank = self.config.rank
+        basis_rank = metric_flat.shape[1]
         data_dim = metric_flat.shape[2]
         normalization = float(data_dim**2)
 
-        gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
-        frob_term = (gram**2).sum(dim=(1, 2)) / normalization
-        projected_delta = torch.matmul(metric_flat, delta_flat.unsqueeze(-1)).squeeze(-1)
-        alignment_term = projected_delta.pow(2).sum(dim=1) / (epsilon * normalization)
-        # For the conditional target Delta Delta^T / (2 epsilon), the omitted
-        # constant is ||Delta||^4 / (4 epsilon^2). Adding it keeps gradients
-        # unchanged while making the minimum easier to interpret.
-        target_sq_norm = delta_flat.pow(2).sum(dim=1)
-        target_term = target_sq_norm.pow(2) / (4.0 * epsilon.pow(2) * normalization)
-        tangent_dim = metric_flat.pow(2).sum(dim=(1, 2))
-        reg_term = self.config.tikhonov_lambda * 2.0 * tangent_dim / normalization
+        metric_gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
+        metric_frob = metric_gram.square().sum(dim=(1, 2)) / normalization
+        score_gram = score_flat.square().sum(dim=1)
+        score_frob = score_gram.square() / normalization
+        metric_score_dot = torch.matmul(metric_flat, score_flat[:, :, None]).squeeze(2)
+        metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
+        frob_term = metric_frob + score_frob + metric_score
 
-        loss = (frob_term + reg_term - alignment_term).mean()
+        metric_delta_dot = torch.matmul(metric_flat, delta_flat[:, :, None]).squeeze(2)
+        metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / (epsilon * normalization)
+        score_delta_dot = (score_flat * delta_flat).sum(dim=1)
+        score_delta = 2 * score_delta_dot.square() / (epsilon * normalization)
+        alignment_term = metric_delta + score_delta
+
+        target_sq_norm = delta_flat.square().sum(dim=1)
+        target_term = target_sq_norm.square() / (epsilon.square() * normalization)
+        tangent_dim = metric_flat.square().sum(dim=(1, 2))
+        score_norm = score_flat.square().sum(dim=1)
+        reg_term = self.config.tikhonov_lambda * 2.0 * (tangent_dim + score_norm) / normalization
+        predicted_score = score_flat
+        target_score = delta_flat / epsilon.sqrt()[:, None]
+        score_matching_term = (predicted_score - target_score).square().mean(dim=1)
+
+        metric_loss = (frob_term + reg_term - alignment_term).mean()
+        score_loss = self.config.score_matching_weight * score_matching_term.mean()
+        loss = metric_loss + score_loss
         target_norm = (target_sq_norm / data_dim).mean()
-        factor_norm = metric_flat.pow(2).sum(dim=(1, 2)).div(rank * data_dim).mean()
+        factor_norm = metric_flat[:, :factor_rank].square().sum(dim=(1, 2)).div(factor_rank * data_dim).mean()
+        mean_offset_norm = metric_flat[:, factor_rank:].square().sum(dim=(1, 2)).div(data_dim).mean()
 
         metrics = {
+            "metric_loss": metric_loss.detach(),
+            "score_matching_loss": score_loss.detach(),
             "frob_term": frob_term.mean().detach(),
             "alignment_term": alignment_term.mean().detach(),
             "target_term": target_term.mean().detach(),
             "reg_term": reg_term.mean().detach(),
+            "score_matching_term": score_matching_term.mean().detach(),
             "tangent_dim": tangent_dim.mean().detach(),
             "epsilon_mean": epsilon.mean().detach(),
             "effective_batch_size": torch.tensor(float(batch_size), device=images.device),
             "target_delta_norm": target_norm.detach(),
             "factor_norm": factor_norm.detach(),
-            "rank": torch.tensor(float(rank), device=images.device),
+            "mean_offset_norm": mean_offset_norm.detach(),
+            "factor_rank": torch.tensor(float(factor_rank), device=images.device),
+            "metric_basis_rank": torch.tensor(float(basis_rank), device=images.device),
             "data_dim": torch.tensor(float(data_dim), device=images.device),
             "loss_scale_denominator": torch.tensor(normalization, device=images.device),
         }
@@ -161,7 +183,7 @@ class MetricMatchingModule(L.LightningModule):
         epsilon: torch.Tensor,
         reference_eigenvectors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        basis_fields = self(normalized_image, epsilon)
+        basis_fields, _ = self.forward(normalized_image, epsilon)
         eigenvectors, eigenvalues = self._top_metric_eigenvectors(basis_fields)
         eigenvectors = self._align_eigenvectors(eigenvectors[0], reference_eigenvectors)
         eigenvalues = eigenvalues[0]
@@ -263,7 +285,7 @@ class MetricMatchingModule(L.LightningModule):
         flat_basis = basis_fields.flatten(start_dim=2)
         _, singular_values, vh = torch.linalg.svd(flat_basis, full_matrices=False)
         eigenvectors = vh.view(vh.shape[0], vh.shape[1], *basis_fields.shape[2:])
-        eigenvalues = singular_values.pow(2)
+        eigenvalues = singular_values.square()
         return eigenvectors, eigenvalues
 
     def _log_vector_field_grid(self) -> None:
@@ -284,7 +306,7 @@ class MetricMatchingModule(L.LightningModule):
         epsilon = torch.full((num_samples,), epsilon_value, device=self.device, dtype=normalized_batch.dtype)
 
         with torch.no_grad():
-            basis_fields = self(normalized_batch, epsilon)
+            basis_fields, _ = self.forward(normalized_batch, epsilon)
             eigenvectors, eigenvalues = self._top_metric_eigenvectors(basis_fields)
 
         num_fields = min(self.config.preview_fields, eigenvectors.shape[1])
@@ -294,7 +316,7 @@ class MetricMatchingModule(L.LightningModule):
         displayed_eigenvalues = []
         for field_idx in range(num_fields):
             row_fields = eigenvectors[:, field_idx]
-            row_scale = row_fields.pow(2).mean(dim=(1, 2, 3)).sqrt().max().clamp_min(1e-6)
+            row_scale = row_fields.square().mean(dim=(1, 2, 3)).sqrt().max().clamp_min(1e-6)
             row_images = [
                 self._visualize_vector_field(row_fields[sample_idx], row_scale).cpu()
                 for sample_idx in range(num_samples)
@@ -351,7 +373,7 @@ class MetricMatchingModule(L.LightningModule):
         rows: list[list[torch.Tensor]] = []
         for field_idx in range(num_fields):
             vector_field = eigenvectors[field_idx]
-            rms = vector_field.pow(2).mean().sqrt().clamp_min(1e-6)
+            rms = vector_field.square().mean().sqrt().clamp_min(1e-6)
             scale_factor = torch.as_tensor(
                 self.config.preview_scale,
                 device=self.device,
