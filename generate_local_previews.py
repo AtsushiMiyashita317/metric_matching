@@ -109,7 +109,7 @@ def build_vector_fields_canvas(
     epsilon = torch.full((num_samples,), epsilon_value, device=device, dtype=normalized_batch.dtype)
 
     with torch.no_grad():
-        basis_fields, _ = model._metric_basis_and_mu(normalized_batch, epsilon)
+        basis_fields, _ = model.forward(normalized_batch, epsilon)
         eigenvectors, eigenvalues = model._top_metric_eigenvectors(basis_fields)
 
     num_fields = min(model.config.preview_fields, eigenvectors.shape[1])
