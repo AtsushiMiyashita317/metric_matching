@@ -141,7 +141,7 @@ def build_vector_field_integrations_canvas(
     datamodule: Shapes3DDataModule,
     epsilon_value: float,
     device: torch.device,
-) -> tuple[np.ndarray, str]:
+) -> tuple[np.ndarray, str, np.ndarray, str]:
     val_dataset = datamodule.val_dataset
     assert val_dataset is not None
     sample = val_dataset[0]
@@ -152,15 +152,10 @@ def build_vector_field_integrations_canvas(
         eigenvectors, eigenvalues = model._top_metric_eigenvectors_single(normalized_image, epsilon)
 
     num_fields = min(model.config.preview_fields, eigenvectors.shape[0])
-    time_values = torch.linspace(
-        -5.0,
-        5.0,
-        model.config.preview_steps,
-        device=device,
-        dtype=normalized_image.dtype,
-    )
 
     rows: list[list[torch.Tensor]] = []
+    velocity_rows: list[list[torch.Tensor]] = []
+    step_bounds: tuple[int, int] | None = None
     with torch.no_grad():
         for field_idx in range(num_fields):
             vector_field = eigenvectors[field_idx]
@@ -170,28 +165,37 @@ def build_vector_field_integrations_canvas(
                 device=device,
                 dtype=normalized_image.dtype,
             ) / rms
-            row_images = []
-            for t in time_values:
-                integrated = model._integrate_basis_field_rk4(
-                    base_image=normalized_image,
-                    epsilon=epsilon,
-                    field_idx=field_idx,
-                    target_time=float(t.item()),
-                    scale_factor=scale_factor,
-                    reference_eigenvectors=eigenvectors,
-                )[0]
-                transformed = denormalize(integrated, datamodule).clamp(0.0, 1.0)
-                row_images.append(transformed.cpu())
+            geodesic_images, geodesic_velocities, step_bounds = model._preview_geodesic_images(
+                initial_image=normalized_image,
+                initial_velocity=vector_field.unsqueeze(0),
+                epsilon=epsilon,
+                scale_factor=scale_factor,
+            )
+            row_images = [denormalize(image, datamodule).clamp(0.0, 1.0).cpu() for image in geodesic_images]
+            velocity_scale = torch.stack(geodesic_velocities, dim=0).square().mean(dim=(1, 2, 3, 4)).sqrt().max()
+            velocity_scale = velocity_scale.clamp_min(1e-6)
+            velocity_row = [
+                model._visualize_vector_field(velocity[0], velocity_scale).cpu() for velocity in geodesic_velocities
+            ]
             rows.append(row_images)
+            velocity_rows.append(velocity_row)
 
     canvas = model._build_preview_canvas(rows)
+    velocity_canvas = model._build_preview_canvas(velocity_rows)
+    assert step_bounds is not None
     caption = (
-        f"rows=tracked metric eigenvectors 0..{num_fields - 1}, "
-        f"cols=t in [{time_values[0].item():.2f}, {time_values[-1].item():.2f}], "
+        f"rows=geodesics initialized from top metric eigenvectors 0..{num_fields - 1}, "
+        f"cols=geodesic steps in [{step_bounds[0]}, {step_bounds[1]}], "
         f"epsilon={epsilon_value:.6g}, rk4_substeps={model.config.preview_rk4_substeps}, "
         f"initial_eigenvalues={[round(v.item(), 4) for v in eigenvalues[:num_fields]]}"
     )
-    return canvas, caption
+    velocity_caption = (
+        f"rows=geodesic velocities initialized from top metric eigenvectors 0..{num_fields - 1}, "
+        f"cols=geodesic steps in [{step_bounds[0]}, {step_bounds[1]}], "
+        f"epsilon={epsilon_value:.6g}, rk4_substeps={model.config.preview_rk4_substeps}, "
+        f"initial_eigenvalues={[round(v.item(), 4) for v in eigenvalues[:num_fields]]}"
+    )
+    return canvas, caption, velocity_canvas, velocity_caption
 
 
 def main() -> None:
@@ -214,7 +218,12 @@ def main() -> None:
             epsilon_value=epsilon_value,
             device=device,
         )
-        vector_field_integrations_canvas, vector_field_integrations_caption = build_vector_field_integrations_canvas(
+        (
+            vector_field_integrations_canvas,
+            vector_field_integrations_caption,
+            vector_field_velocity_integrations_canvas,
+            vector_field_velocity_integrations_caption,
+        ) = build_vector_field_integrations_canvas(
             model=model,
             datamodule=datamodule,
             epsilon_value=epsilon_value,
@@ -226,8 +235,12 @@ def main() -> None:
         vector_field_integrations_path = (
             args.out_dir / f"vector_field_integrations_eps{idx:02d}_{epsilon_tag}.png"
         )
+        vector_field_velocity_integrations_path = (
+            args.out_dir / f"vector_field_velocity_integrations_eps{idx:02d}_{epsilon_tag}.png"
+        )
         save_canvas(vector_fields_canvas, vector_fields_path)
         save_canvas(vector_field_integrations_canvas, vector_field_integrations_path)
+        save_canvas(vector_field_velocity_integrations_canvas, vector_field_velocity_integrations_path)
         manifest.extend(
             [
                 {
@@ -241,6 +254,12 @@ def main() -> None:
                     "epsilon": epsilon_value,
                     "path": str(vector_field_integrations_path.resolve()),
                     "caption": vector_field_integrations_caption,
+                },
+                {
+                    "type": "vector_field_velocity_integrations",
+                    "epsilon": epsilon_value,
+                    "path": str(vector_field_velocity_integrations_path.resolve()),
+                    "caption": vector_field_velocity_integrations_caption,
                 },
             ]
         )

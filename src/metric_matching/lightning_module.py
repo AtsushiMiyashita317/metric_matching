@@ -58,6 +58,39 @@ class MetricMatchingModule(L.LightningModule):
     def forward(self, image: torch.Tensor, epsilon: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.network(image, epsilon)
 
+    def _forward_metric_single(self, image: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
+        # image: [C, H, W], epsilon: [], returns metric_factors: [K, C, H, W]
+        metric_factors, _ = self.forward(image.unsqueeze(0), epsilon.unsqueeze(0))
+        return metric_factors[0]
+
+    def _forward_metric_and_tangent_single(
+        self, 
+        image: torch.Tensor, 
+        tangent: torch.Tensor,
+        epsilon: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # image/tangent: [C, H, W], epsilon: [], returns metric_factors: [K, C, H, W], metric_derivatives: [K, C, H, W]
+        metric_factors, metric_derivatives = torch.func.jvp(
+            lambda img: self._forward_metric_single(img, epsilon),
+            (image,),
+            (tangent,),
+        )
+        return metric_factors, metric_derivatives
+    
+    def forward_metric_and_tangent(
+        self,
+        image: torch.Tensor,
+        tangent: torch.Tensor,
+        epsilon: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # image/tangent: [B, C, H, W], epsilon: [B], returns metric_factors/metric_derivatives: [B, K, C, H, W]
+        metric_factors, metric_derivatives = torch.func.vmap(self._forward_metric_and_tangent_single)(
+            image,
+            tangent,
+            epsilon,
+        )
+        return metric_factors, metric_derivatives
+    
     def sample_epsilon(self, batch_size: int, device: torch.device) -> torch.Tensor:
         eps_min = torch.tensor(self.config.epsilon_min, device=device).log()
         eps_max = torch.tensor(self.config.epsilon_max, device=device).log()
@@ -65,15 +98,19 @@ class MetricMatchingModule(L.LightningModule):
 
     def compute_low_rank_loss(self, images: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.config.copies_per_sample > 1:
+            # images: [B, C, H, W] -> [B * copies_per_sample, C, H, W]
             images = images.repeat_interleave(self.config.copies_per_sample, dim=0)
 
         batch_size = images.shape[0]
         epsilon = self.sample_epsilon(batch_size, images.device)
+        # epsilon: [B], noise/noisy_images/delta: [B, C, H, W]
         noise = torch.randn_like(images) * epsilon.sqrt()[:, None, None, None]
         noisy_images = images + noise
         delta = images - noisy_images
+        # metric_basis: [B, rank + 1, C, H, W], score: [B, C, H, W]
         metric_basis, score = self.forward(noisy_images, epsilon)
 
+        # metric_flat: [B, rank + 1, C * H * W], score_flat/delta_flat: [B, C * H * W]
         metric_flat = metric_basis.flatten(start_dim=2)
         score_flat = score.flatten(start_dim=1)
         metric_loss_score_flat = score_flat.detach() if self.config.detach_score_in_metric_loss else score_flat
@@ -83,6 +120,7 @@ class MetricMatchingModule(L.LightningModule):
         data_dim = metric_flat.shape[2]
         normalization = float(data_dim**2)
 
+        # metric_gram: [B, rank + 1, rank + 1], metric_score_dot: [B, rank + 1]
         metric_gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
         metric_frob = metric_gram.square().sum(dim=(1, 2)) / normalization
         score_gram = metric_loss_score_flat.square().sum(dim=1)
@@ -91,6 +129,7 @@ class MetricMatchingModule(L.LightningModule):
         metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
         frob_term = metric_frob + score_frob + metric_score
 
+        # metric_delta_dot: [B, rank + 1], score_delta_dot/target_sq_norm: [B]
         metric_delta_dot = torch.matmul(metric_flat, delta_flat[:, :, None]).squeeze(2)
         metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / (epsilon * normalization)
         score_delta_dot = (metric_loss_score_flat * delta_flat).sum(dim=1)
@@ -156,9 +195,11 @@ class MetricMatchingModule(L.LightningModule):
         eigenvectors: torch.Tensor,
         reference_eigenvectors: torch.Tensor | None,
     ) -> torch.Tensor:
+        # eigenvectors/reference_eigenvectors: [K, C, H, W]
         if reference_eigenvectors is None:
             return eigenvectors
 
+        # flat_current/flat_reference: [K, C * H * W], similarity: [K, K]
         flat_current = eigenvectors.flatten(start_dim=1)
         flat_reference = reference_eigenvectors.flatten(start_dim=1)
         similarity = torch.matmul(flat_reference, flat_current.transpose(0, 1))
@@ -185,8 +226,10 @@ class MetricMatchingModule(L.LightningModule):
         epsilon: torch.Tensor,
         reference_eigenvectors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # normalized_image: [1, C, H, W], epsilon: [1]
         basis_fields, _ = self.forward(normalized_image, epsilon)
         eigenvectors, eigenvalues = self._top_metric_eigenvectors(basis_fields)
+        # eigenvectors[0]: [K, C, H, W], eigenvalues[0]: [K]
         eigenvectors = self._align_eigenvectors(eigenvectors[0], reference_eigenvectors)
         eigenvalues = eigenvalues[0]
         return eigenvectors, eigenvalues
@@ -203,6 +246,7 @@ class MetricMatchingModule(L.LightningModule):
             epsilon=epsilon,
             reference_eigenvectors=reference_eigenvectors,
         )
+        # returns tracked field: [1, C, H, W], all eigenvectors: [K, C, H, W]
         return eigenvectors[field_idx].unsqueeze(0), eigenvectors
 
     def _integrate_basis_field_rk4(
@@ -216,6 +260,7 @@ class MetricMatchingModule(L.LightningModule):
     ) -> torch.Tensor:
         substeps = max(1, int(abs(target_time) * self.config.preview_rk4_substeps))
         dt = target_time / substeps
+        # state/base_image: [1, C, H, W], each k*: [1, C, H, W]
         state = base_image.clone()
         tracked_eigenvectors = reference_eigenvectors
 
@@ -251,6 +296,80 @@ class MetricMatchingModule(L.LightningModule):
             )
 
         return state
+    
+    def evaluate_geodesic_direction(
+        self,
+        image_velocity: torch.Tensor,
+        epsilon: torch.Tensor,
+    ) -> torch.Tensor:
+        image, velocity = image_velocity.select(-1, 0), image_velocity.select(-1, 1)
+        metric_factors, metric_derivatives = self.forward_metric_and_tangent(image, velocity, epsilon)
+        a1 = torch.einsum("bkcij,bcij->bk", metric_derivatives, velocity)
+        a1 = torch.einsum("bk,bkcij->bcij", a1, metric_factors)
+        a2 = torch.einsum("bkcij,bcij->bk", metric_factors, velocity)
+        a2 = torch.einsum("bk,bkcij->bcij", a2, metric_derivatives)
+        acceleration = a1 + a2
+        derivative = torch.stack([velocity, acceleration], dim=-1)
+        return derivative
+
+    def integrate_geodesic_rk4(
+        self,
+        initial_image: torch.Tensor,
+        initial_velocity: torch.Tensor,
+        epsilon: torch.Tensor,
+        time_per_step: float,
+        steps: int,
+        scale_factor: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        substeps = self.config.preview_rk4_substeps
+        dt = time_per_step / substeps
+        state = torch.stack([initial_image, initial_velocity], dim=-1)
+        image_list = [initial_image]
+        velocity_list = [initial_velocity]
+        for _ in range(steps):
+            for _ in range(substeps):
+                d1 = self.evaluate_geodesic_direction(state, epsilon)
+                k1 = scale_factor * d1
+                d2 = self.evaluate_geodesic_direction(state + 0.5 * dt * k1, epsilon)
+                k2 = scale_factor * d2
+                d3 = self.evaluate_geodesic_direction(state + 0.5 * dt * k2, epsilon)
+                k3 = scale_factor * d3
+                d4 = self.evaluate_geodesic_direction(state + dt * k3, epsilon)
+                k4 = scale_factor * d4
+                state = state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            image_list.append(state.select(-1, 0))
+            velocity_list.append(state.select(-1, 1))
+        return image_list, velocity_list
+
+    def _preview_geodesic_images(
+        self,
+        initial_image: torch.Tensor,
+        initial_velocity: torch.Tensor,
+        epsilon: torch.Tensor,
+        scale_factor: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], tuple[int, int]]:
+        left_steps = self.config.preview_steps // 2
+        right_steps = self.config.preview_steps - 1 - left_steps
+
+        negative_images, negative_velocities = self.integrate_geodesic_rk4(
+            initial_image=initial_image,
+            initial_velocity=-initial_velocity,
+            epsilon=epsilon,
+            time_per_step=1.0,
+            steps=left_steps,
+            scale_factor=scale_factor,
+        )
+        positive_images, positive_velocities = self.integrate_geodesic_rk4(
+            initial_image=initial_image,
+            initial_velocity=initial_velocity,
+            epsilon=epsilon,
+            time_per_step=1.0,
+            steps=right_steps,
+            scale_factor=scale_factor,
+        )
+        images = list(reversed(negative_images[1:])) + positive_images
+        velocities = list(reversed(negative_velocities[1:])) + positive_velocities
+        return images, velocities, (-left_steps, right_steps)
 
     def _build_preview_canvas(self, cell_images: list[list[torch.Tensor]]) -> np.ndarray:
         rows = len(cell_images)
@@ -284,8 +403,10 @@ class MetricMatchingModule(L.LightningModule):
         return image.clamp(0.0, 1.0)
 
     def _top_metric_eigenvectors(self, basis_fields: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # basis_fields: [B, K, C, H, W]
         flat_basis = basis_fields.flatten(start_dim=2)
         _, singular_values, vh = torch.linalg.svd(flat_basis, full_matrices=False)
+        # singular_values: [B, K], vh/eigenvectors: [B, K, C * H * W] -> [B, K, C, H, W]
         eigenvectors = vh.view(vh.shape[0], vh.shape[1], *basis_fields.shape[2:])
         eigenvalues = singular_values.square()
         return eigenvectors, eigenvalues
@@ -303,6 +424,7 @@ class MetricMatchingModule(L.LightningModule):
 
         num_samples = min(self.config.preview_samples, len(val_dataset))
         samples = [val_dataset[idx]["image"] for idx in range(num_samples)]
+        # normalized_batch: [B, C, H, W], epsilon: [B]
         normalized_batch = torch.stack(samples, dim=0).to(self.device)
         epsilon_value = (self.config.epsilon_min * self.config.epsilon_max) ** 0.5
         epsilon = torch.full((num_samples,), epsilon_value, device=self.device, dtype=normalized_batch.dtype)
@@ -364,15 +486,9 @@ class MetricMatchingModule(L.LightningModule):
             eigenvectors, eigenvalues = self._top_metric_eigenvectors_single(normalized_image, epsilon)
 
         num_fields = min(self.config.preview_fields, eigenvectors.shape[0])
-        time_values = torch.linspace(
-            -1.0,
-            1.0,
-            self.config.preview_steps,
-            device=self.device,
-            dtype=normalized_image.dtype,
-        )
-
         rows: list[list[torch.Tensor]] = []
+        velocity_rows: list[list[torch.Tensor]] = []
+        step_bounds: tuple[int, int] | None = None
         for field_idx in range(num_fields):
             vector_field = eigenvectors[field_idx]
             rms = vector_field.square().mean().sqrt().clamp_min(1e-6)
@@ -381,24 +497,33 @@ class MetricMatchingModule(L.LightningModule):
                 device=self.device,
                 dtype=normalized_image.dtype,
             ) / rms
-            row_images = []
-            for t in time_values:
-                integrated = self._integrate_basis_field_rk4(
-                    base_image=normalized_image,
-                    epsilon=epsilon,
-                    field_idx=field_idx,
-                    target_time=float(t.item()),
-                    scale_factor=scale_factor,
-                    reference_eigenvectors=eigenvectors,
-                )[0]
-                transformed = self._denormalize_image(integrated).clamp(0.0, 1.0)
-                row_images.append(transformed.cpu())
+            geodesic_images, geodesic_velocities, step_bounds = self._preview_geodesic_images(
+                initial_image=normalized_image,
+                initial_velocity=vector_field.unsqueeze(0),
+                epsilon=epsilon,
+                scale_factor=scale_factor,
+            )
+            row_images = [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in geodesic_images]
+            velocity_scale = torch.stack(geodesic_velocities, dim=0).square().mean(dim=(1, 2, 3, 4)).sqrt().max()
+            velocity_scale = velocity_scale.clamp_min(1e-6)
+            velocity_row = [
+                self._visualize_vector_field(velocity[0], velocity_scale).cpu() for velocity in geodesic_velocities
+            ]
             rows.append(row_images)
+            velocity_rows.append(velocity_row)
 
         canvas = self._build_preview_canvas(rows)
+        velocity_canvas = self._build_preview_canvas(velocity_rows)
+        assert step_bounds is not None
         caption = (
-            f"rows=tracked metric eigenvectors 0..{num_fields - 1}, "
-            f"cols=t in [{time_values[0].item():.2f}, {time_values[-1].item():.2f}], "
+            f"rows=geodesics initialized from top metric eigenvectors 0..{num_fields - 1}, "
+            f"cols=geodesic steps in [{step_bounds[0]}, {step_bounds[1]}], "
+            f"epsilon={epsilon_value:.4g}, rk4_substeps={self.config.preview_rk4_substeps}, "
+            f"initial_eigenvalues={[round(v.item(), 4) for v in eigenvalues[:num_fields]]}"
+        )
+        velocity_caption = (
+            f"rows=geodesic velocities initialized from top metric eigenvectors 0..{num_fields - 1}, "
+            f"cols=geodesic steps in [{step_bounds[0]}, {step_bounds[1]}], "
             f"epsilon={epsilon_value:.4g}, rk4_substeps={self.config.preview_rk4_substeps}, "
             f"initial_eigenvalues={[round(v.item(), 4) for v in eigenvalues[:num_fields]]}"
         )
@@ -410,6 +535,10 @@ class MetricMatchingModule(L.LightningModule):
             experiment.log(
                 {
                     "val/vector_field_integrations": wandb.Image(canvas, caption=caption),
+                    "val/vector_field_velocity_integrations": wandb.Image(
+                        velocity_canvas,
+                        caption=velocity_caption,
+                    ),
                 },
                 step=self.global_step,
             )
