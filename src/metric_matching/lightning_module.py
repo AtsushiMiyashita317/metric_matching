@@ -503,7 +503,7 @@ class MetricMatchingModule(L.LightningModule):
                 epsilon=epsilon,
                 scale_factor=scale_factor,
             )
-            row_images = [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in geodesic_images]
+            row_images = [self._denormalize_image(image)[0].clamp(0.0, 1.0).cpu() for image in geodesic_images]
             velocity_scale = torch.stack(geodesic_velocities, dim=0).square().mean(dim=(1, 2, 3, 4)).sqrt().max()
             velocity_scale = velocity_scale.clamp_min(1e-6)
             velocity_row = [

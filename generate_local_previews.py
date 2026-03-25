@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--data-path", type=Path, default=PROJECT_ROOT / "3dshapes.h5")
-    parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "generated_previews" / "latest_run")
+    parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "results" / "latest_run")
     parser.add_argument("--num-epsilons", type=int, default=7)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -171,7 +171,7 @@ def build_vector_field_integrations_canvas(
                 epsilon=epsilon,
                 scale_factor=scale_factor,
             )
-            row_images = [denormalize(image, datamodule).clamp(0.0, 1.0).cpu() for image in geodesic_images]
+            row_images = [denormalize(image, datamodule)[0].clamp(0.0, 1.0).cpu() for image in geodesic_images]
             velocity_scale = torch.stack(geodesic_velocities, dim=0).square().mean(dim=(1, 2, 3, 4)).sqrt().max()
             velocity_scale = velocity_scale.clamp_min(1e-6)
             velocity_row = [
