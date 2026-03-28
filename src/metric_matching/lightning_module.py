@@ -201,6 +201,7 @@ class MetricMatchingModule(L.LightningModule):
         metrics = {
             "metric_loss": metric_loss.detach(),
             "score_matching_loss": score_loss.detach(),
+            "projection_loss": projection_loss.detach(),
             "frob_term": frob_term.mean().detach(),
             "alignment_term": alignment_term.mean().detach(),
             "target_term": target_term.mean().detach(),
