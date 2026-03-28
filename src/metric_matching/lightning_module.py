@@ -439,6 +439,24 @@ class MetricMatchingModule(L.LightningModule):
                 canvas[y0 : y0 + height, x0 : x0 + width] = image_np
         return canvas
 
+    def _preview_epsilon_values(
+        self,
+        num_values: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if num_values <= 1:
+            epsilon_value = (self.config.epsilon_min * self.config.epsilon_max) ** 0.5
+            return torch.full((1,), epsilon_value, device=device, dtype=dtype)
+        log_eps = torch.linspace(
+            np.log(self.config.epsilon_min),
+            np.log(self.config.epsilon_max),
+            steps=num_values,
+            device=device,
+            dtype=dtype,
+        )
+        return log_eps.exp()
+
     def _visualize_vector_field(
         self,
         vector_field: torch.Tensor,
@@ -472,8 +490,12 @@ class MetricMatchingModule(L.LightningModule):
         samples = [val_dataset[idx]["image"] for idx in range(num_samples)]
         # normalized_batch: [B, C, H, W], epsilon: [B]
         normalized_batch = torch.stack(samples, dim=0).to(self.device)
-        epsilon_value = (self.config.epsilon_min * self.config.epsilon_max) ** 0.5
-        epsilon = torch.full((num_samples,), epsilon_value, device=self.device, dtype=normalized_batch.dtype)
+        epsilon = self._preview_epsilon_values(
+            num_values=1,
+            device=self.device,
+            dtype=normalized_batch.dtype,
+        ).expand(num_samples)
+        epsilon_value = epsilon[0].item()
 
         with torch.no_grad():
             basis_fields, _ = self.forward(normalized_batch, epsilon)
@@ -508,6 +530,65 @@ class MetricMatchingModule(L.LightningModule):
             experiment.log(
                 {
                     "val/vector_fields": wandb.Image(canvas, caption=caption),
+                },
+                step=self.global_step,
+            )
+
+    def _log_vector_field_epsilon_grid(self) -> None:
+        if self.trainer is None or self.trainer.sanity_checking:
+            return
+        if self.logger is None or not hasattr(self.logger, "experiment"):
+            return
+
+        datamodule = getattr(self.trainer, "datamodule", None)
+        val_dataset = getattr(datamodule, "val_dataset", None)
+        if val_dataset is None or len(val_dataset) == 0:
+            return
+
+        num_epsilons = max(1, self.config.preview_samples)
+        normalized_image = val_dataset[0]["image"].unsqueeze(0).to(self.device)
+        epsilon = self._preview_epsilon_values(
+            num_values=num_epsilons,
+            device=self.device,
+            dtype=normalized_image.dtype,
+        )
+        repeated_image = normalized_image.expand(num_epsilons, -1, -1, -1)
+
+        with torch.no_grad():
+            basis_fields, _ = self.forward(repeated_image, epsilon)
+            eigenvectors, eigenvalues = self._top_metric_eigenvectors(basis_fields)
+
+        num_fields = min(self.config.preview_fields, eigenvectors.shape[1])
+        rows: list[list[torch.Tensor]] = []
+        base_image = self._denormalize_image(normalized_image[0]).clamp(0.0, 1.0).cpu()
+        rows.append([base_image.clone() for _ in range(num_epsilons)])
+
+        displayed_eigenvalues = []
+        for field_idx in range(num_fields):
+            row_fields = eigenvectors[:, field_idx]
+            row_scale = row_fields.square().mean(dim=(1, 2, 3)).sqrt().max().clamp_min(1e-6)
+            row_images = [
+                self._visualize_vector_field(row_fields[epsilon_idx], row_scale).cpu()
+                for epsilon_idx in range(num_epsilons)
+            ]
+            rows.append(row_images)
+            displayed_eigenvalues.append([round(v.item(), 4) for v in eigenvalues[:, field_idx]])
+
+        canvas = self._build_preview_canvas(rows)
+        epsilon_values = [round(v.item(), 6) for v in epsilon]
+        caption = (
+            f"top row=input image, lower rows=top metric eigenvectors 0..{num_fields - 1}, "
+            f"cols=epsilon sweep for validation sample 0, epsilons={epsilon_values}, "
+            f"eigenvalues_by_row={displayed_eigenvalues}"
+        )
+
+        experiment = self.logger.experiment
+        if hasattr(experiment, "log"):
+            import wandb
+
+            experiment.log(
+                {
+                    "val/vector_fields_by_epsilon": wandb.Image(canvas, caption=caption),
                 },
                 step=self.global_step,
             )
@@ -597,6 +678,7 @@ class MetricMatchingModule(L.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         self._log_vector_field_grid()
+        self._log_vector_field_epsilon_grid()
         self._log_vector_field_preview()
 
     def configure_optimizers(self):
