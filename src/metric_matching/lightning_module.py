@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import lightning as L
 import numpy as np
@@ -27,6 +28,8 @@ class MetricMatchingConfig:
     tikhonov_lambda: float = 1e-4
     score_matching_weight: float = 1.0
     detach_score_in_metric_loss: bool = False
+    score_target: Literal["noise", "mean"] = "noise"
+    metric_target: Literal["direction", "destination"] = "direction"
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -40,6 +43,16 @@ class MetricMatchingModule(L.LightningModule):
         self.config = config
         if self.config.copies_per_sample < 1:
             raise ValueError(f"copies_per_sample must be at least 1, got {self.config.copies_per_sample}")
+        if self.config.score_target not in {"noise", "mean"}:
+            raise ValueError(
+                "score_target must be one of {'noise', 'mean'}, "
+                f"got {self.config.score_target}"
+            )
+        if self.config.metric_target not in {"direction", "destination"}:
+            raise ValueError(
+                "metric_target must be one of {'direction', 'destination'}, "
+                f"got {self.config.metric_target}"
+            )
         self.save_hyperparameters(asdict(config))
         self.network = MetricFactorNetwork(
             in_channels=config.image_channels,
@@ -56,7 +69,10 @@ class MetricMatchingModule(L.LightningModule):
         )
 
     def forward(self, image: torch.Tensor, epsilon: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.network(image, epsilon)
+        metric_basis_prediction, score_prediction = self.network(image, epsilon)
+        score = self._prediction_to_score(score_prediction, image, epsilon)
+        metric_basis = self._prediction_to_metric_basis(metric_basis_prediction, image, score, epsilon)
+        return metric_basis, score
 
     def _forward_metric_single(self, image: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
         # image: [C, H, W], epsilon: [], returns metric_factors: [K, C, H, W]
@@ -96,6 +112,31 @@ class MetricMatchingModule(L.LightningModule):
         eps_max = torch.tensor(self.config.epsilon_max, device=device).log()
         return torch.exp(torch.rand(batch_size, device=device) * (eps_max - eps_min) + eps_min)
 
+    def _prediction_to_score(
+        self,
+        prediction: torch.Tensor,
+        noisy_images: torch.Tensor,
+        epsilon: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.config.score_target == "noise":
+            return prediction
+        return (prediction - noisy_images) / epsilon.sqrt()[:, None, None, None]
+
+    def _prediction_to_metric_basis(
+        self,
+        metric_basis_prediction: torch.Tensor,
+        noisy_images: torch.Tensor,
+        score: torch.Tensor,
+        epsilon: torch.Tensor,
+    ) -> torch.Tensor:
+        _, _, channels, height, width = metric_basis_prediction.shape
+        if self.config.metric_target == "direction":
+            return metric_basis_prediction / (channels * height * width) ** 0.5
+        if self.config.detach_score_in_metric_loss:
+            score = score.detach()
+        mean_images = noisy_images - score * epsilon.sqrt()[:, None, None, None]
+        return (metric_basis_prediction - mean_images[:, None, :, :, :])
+
     def compute_low_rank_loss(self, images: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.config.copies_per_sample > 1:
             # images: [B, C, H, W] -> [B * copies_per_sample, C, H, W]
@@ -104,9 +145,8 @@ class MetricMatchingModule(L.LightningModule):
         batch_size = images.shape[0]
         epsilon = self.sample_epsilon(batch_size, images.device)
         # epsilon: [B], noise/noisy_images/delta: [B, C, H, W]
-        noise = torch.randn_like(images) * epsilon.sqrt()[:, None, None, None]
-        noisy_images = images + noise
-        delta = images - noisy_images
+        noise = torch.randn_like(images)
+        noisy_images = images + epsilon.sqrt()[:, None, None, None] * noise
         # metric_basis: [B, rank + 1, C, H, W], score: [B, C, H, W]
         metric_basis, score = self.forward(noisy_images, epsilon)
 
@@ -114,7 +154,7 @@ class MetricMatchingModule(L.LightningModule):
         metric_flat = metric_basis.flatten(start_dim=2)
         score_flat = score.flatten(start_dim=1)
         metric_loss_score_flat = score_flat.detach() if self.config.detach_score_in_metric_loss else score_flat
-        delta_flat = delta.flatten(start_dim=1)
+        noise_flat = noise.flatten(start_dim=1)
         factor_rank = self.config.rank
         basis_rank = metric_flat.shape[1]
         data_dim = metric_flat.shape[2]
@@ -130,20 +170,18 @@ class MetricMatchingModule(L.LightningModule):
         frob_term = metric_frob + score_frob + metric_score
 
         # metric_delta_dot: [B, rank + 1], score_delta_dot/target_sq_norm: [B]
-        metric_delta_dot = torch.matmul(metric_flat, delta_flat[:, :, None]).squeeze(2)
-        metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / (epsilon * normalization)
-        score_delta_dot = (metric_loss_score_flat * delta_flat).sum(dim=1)
-        score_delta = 2 * score_delta_dot.square() / (epsilon * normalization)
+        metric_delta_dot = torch.matmul(metric_flat, noise_flat[:, :, None]).squeeze(2)
+        metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / normalization
+        score_delta_dot = (metric_loss_score_flat * noise_flat).sum(dim=1)
+        score_delta = 2 * score_delta_dot.square() / normalization
         alignment_term = metric_delta + score_delta
 
-        target_sq_norm = delta_flat.square().sum(dim=1)
-        target_term = target_sq_norm.square() / (epsilon.square() * normalization)
+        target_sq_norm = noise_flat.square().sum(dim=1)
+        target_term = target_sq_norm.square() / normalization
         tangent_dim = metric_flat.square().sum(dim=(1, 2))
         score_norm = metric_loss_score_flat.square().sum(dim=1)
         reg_term = self.config.tikhonov_lambda * 2.0 * (tangent_dim + score_norm) / normalization
-        predicted_score = score_flat
-        target_score = delta_flat / epsilon.sqrt()[:, None]
-        score_matching_term = (predicted_score - target_score).square().mean(dim=1)
+        score_matching_term = (score_flat - noise_flat).square().mean(dim=1)
 
         metric_loss = (frob_term + reg_term - alignment_term).mean()
         score_loss = self.config.score_matching_weight * score_matching_term.mean()
@@ -170,6 +208,14 @@ class MetricMatchingModule(L.LightningModule):
             "metric_basis_rank": torch.tensor(float(basis_rank), device=images.device),
             "data_dim": torch.tensor(float(data_dim), device=images.device),
             "loss_scale_denominator": torch.tensor(normalization, device=images.device),
+            "score_mode": torch.tensor(
+                0.0 if self.config.score_target == "noise" else 1.0,
+                device=images.device,
+            ),
+            "metric_mode": torch.tensor(
+                0.0 if self.config.metric_target == "direction" else 1.0,
+                device=images.device,
+            ),
         }
         return loss, metrics
 
