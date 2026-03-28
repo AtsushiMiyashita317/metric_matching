@@ -27,6 +27,7 @@ class MetricMatchingConfig:
     copies_per_sample: int = 1
     tikhonov_lambda: float = 1e-4
     score_matching_weight: float = 1.0
+    projection_weight: float = 0.0
     detach_score_in_metric_loss: bool = False
     score_target: Literal["noise", "mean"] = "noise"
     metric_target: Literal["direction", "destination"] = "direction"
@@ -147,10 +148,10 @@ class MetricMatchingModule(L.LightningModule):
         # epsilon: [B], noise/noisy_images/delta: [B, C, H, W]
         noise = torch.randn_like(images)
         noisy_images = images + epsilon.sqrt()[:, None, None, None] * noise
-        # metric_basis: [B, rank + 1, C, H, W], score: [B, C, H, W]
+        # metric_basis: [B, rank, C, H, W], score: [B, C, H, W]
         metric_basis, score = self.forward(noisy_images, epsilon)
 
-        # metric_flat: [B, rank + 1, C * H * W], score_flat/delta_flat: [B, C * H * W]
+        # metric_flat: [B, rank, C * H * W], score_flat/delta_flat: [B, C * H * W]
         metric_flat = metric_basis.flatten(start_dim=2)
         score_flat = score.flatten(start_dim=1)
         metric_loss_score_flat = score_flat.detach() if self.config.detach_score_in_metric_loss else score_flat
@@ -160,7 +161,7 @@ class MetricMatchingModule(L.LightningModule):
         data_dim = metric_flat.shape[2]
         normalization = float(data_dim**2)
 
-        # metric_gram: [B, rank + 1, rank + 1], metric_score_dot: [B, rank + 1]
+        # metric_gram: [B, rank, rank], metric_score_dot: [B, rank]
         metric_gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
         metric_frob = metric_gram.square().sum(dim=(1, 2)) / normalization
         score_gram = metric_loss_score_flat.square().sum(dim=1)
@@ -169,12 +170,18 @@ class MetricMatchingModule(L.LightningModule):
         metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
         frob_term = metric_frob + score_frob + metric_score
 
-        # metric_delta_dot: [B, rank + 1], score_delta_dot/target_sq_norm: [B]
+        # metric_delta_dot: [B, rank], score_delta_dot/target_sq_norm: [B]
         metric_delta_dot = torch.matmul(metric_flat, noise_flat[:, :, None]).squeeze(2)
         metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / normalization
         score_delta_dot = (metric_loss_score_flat * noise_flat).sum(dim=1)
         score_delta = 2 * score_delta_dot.square() / normalization
         alignment_term = metric_delta + score_delta
+
+        metric_gram3 = torch.matmul(metric_gram, metric_flat)
+        metric_frob3 = metric_gram3.square().sum(dim=(1, 2)) / normalization
+        metric_gram4 = torch.matmul(metric_gram, metric_gram)
+        metric_frob4 = metric_gram4.square().sum(dim=(1, 2)) / normalization
+        projection_term = metric_frob - 2 * metric_frob3 + metric_frob4
 
         target_sq_norm = noise_flat.square().sum(dim=1)
         target_term = target_sq_norm.square() / normalization
@@ -185,7 +192,8 @@ class MetricMatchingModule(L.LightningModule):
 
         metric_loss = (frob_term + reg_term - alignment_term).mean()
         score_loss = self.config.score_matching_weight * score_matching_term.mean()
-        loss = metric_loss + score_loss
+        projection_loss = self.config.projection_weight * projection_term.mean()
+        loss = metric_loss + score_loss + projection_loss
         target_norm = (target_sq_norm / data_dim).mean()
         factor_norm = metric_flat[:, :factor_rank].square().sum(dim=(1, 2)).div(factor_rank * data_dim).mean()
         mean_offset_norm = metric_flat[:, factor_rank:].square().sum(dim=(1, 2)).div(data_dim).mean()
