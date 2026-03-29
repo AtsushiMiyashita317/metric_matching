@@ -57,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-scale", type=float, default=0.25)
     parser.add_argument("--preview-rk4-substeps", type=int, default=8)
     parser.add_argument("--val-fraction", type=float, default=0.05)
+    parser.add_argument("--disable-normalize", action="store_true")
     parser.add_argument("--stats-samples", type=int, default=8192)
     parser.add_argument("--smoothing-sigma", type=float, default=0.6)
     parser.add_argument("--max-train-samples", type=int, default=None)
@@ -83,6 +84,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         val_fraction=args.val_fraction,
+        normalize=not args.disable_normalize,
         stats_samples=args.stats_samples,
         smoothing_sigma=args.smoothing_sigma,
         max_train_samples=args.max_train_samples,
@@ -143,6 +145,7 @@ def main() -> None:
                 "image_width": width,
                 "torch_version": torch.__version__,
                 "dataset_path": str(Path(args.data_path).resolve()),
+                "normalize": not args.disable_normalize,
                 "smoothing_sigma": args.smoothing_sigma,
             }
         )
