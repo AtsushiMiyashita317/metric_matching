@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoothing-sigma", type=float, default=0.6)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
+    parser.add_argument("--enable-color-interpolation", action="store_true")
     parser.add_argument("--project", type=str, default="metric-matching")
     parser.add_argument("--run-name", type=str, default="3dshapes-rmm")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
@@ -86,6 +87,7 @@ def main() -> None:
         smoothing_sigma=args.smoothing_sigma,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
+        enable_color_interpolation=args.enable_color_interpolation,
         seed=args.seed,
     )
     data_module.prepare_data()

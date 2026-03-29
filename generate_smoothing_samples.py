@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from metric_matching.data import Shapes3DDataset, apply_gaussian_smoothing
+from metric_matching.data import Shapes3DDataset, apply_gaussian_smoothing, restore_image_range
 
 
 DEFAULT_OUT_DIR = PROJECT_ROOT / "generated_previews" / "smoothing_samples"
@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def to_uint8_image(image: torch.Tensor) -> np.ndarray:
-    return image.detach().clamp(0.0, 1.0).permute(1, 2, 0).mul(255).byte().cpu().numpy()
+    image = restore_image_range(image.detach())
+    return image.clamp(0.0, 1.0).permute(1, 2, 0).mul(255).byte().cpu().numpy()
 
 
 def save_image(image: np.ndarray, path: Path) -> None:

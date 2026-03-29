@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from metric_matching.data import Shapes3DDataModule
+from metric_matching.data import Shapes3DDataModule, restore_image_range
 from metric_matching.lightning_module import MetricMatchingConfig, MetricMatchingModule
 
 
@@ -82,12 +82,7 @@ def build_datamodule(args: argparse.Namespace) -> Shapes3DDataModule:
 
 
 def denormalize(image: torch.Tensor, datamodule: Shapes3DDataModule) -> torch.Tensor:
-    stats = datamodule.stats
-    if stats is None:
-        return image
-    mean = stats.mean.to(device=image.device, dtype=image.dtype)
-    std = stats.std.to(device=image.device, dtype=image.dtype)
-    return image * std + mean
+    return restore_image_range(image, stats=datamodule.stats)
 
 
 def save_canvas(canvas: np.ndarray, path: Path) -> None:

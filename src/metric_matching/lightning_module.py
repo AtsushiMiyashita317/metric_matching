@@ -7,6 +7,7 @@ import lightning as L
 import numpy as np
 import torch
 
+from metric_matching.data import restore_image_range
 from metric_matching.models import MetricFactorNetwork
 
 
@@ -239,11 +240,7 @@ class MetricMatchingModule(L.LightningModule):
     def _denormalize_image(self, image: torch.Tensor) -> torch.Tensor:
         datamodule = getattr(self.trainer, "datamodule", None)
         stats = getattr(datamodule, "stats", None)
-        if stats is None:
-            return image
-        mean = stats.mean.to(device=image.device, dtype=image.dtype)
-        std = stats.std.to(device=image.device, dtype=image.dtype)
-        return image * std + mean
+        return restore_image_range(image, stats=stats)
 
     def _align_eigenvectors(
         self,
