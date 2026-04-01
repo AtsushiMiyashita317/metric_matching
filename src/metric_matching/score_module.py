@@ -231,8 +231,8 @@ class ScorePretrainingModule(L.LightningModule):
         )
         return log_eps.exp()
 
-    def _visualize_noise(self, noise: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        image = 0.5 + 0.5 * (noise / scale.clamp_min(1e-6))
+    def _visualize_signed_field(self, field: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        image = 0.5 + 0.5 * (field / scale.clamp_min(1e-6))
         return image.clamp(0.0, 1.0)
 
     def _log_denoising_examples(self) -> None:
@@ -267,17 +267,25 @@ class ScorePretrainingModule(L.LightningModule):
                 score_target=self.config.score_target,
             )
 
+        clean_display = self._denormalize_image(clean_images).clamp(0.0, 1.0)
+        noisy_display = self._denormalize_image(noisy_images).clamp(0.0, 1.0)
+        denoised_display = self._denormalize_image(denoised).clamp(0.0, 1.0)
+        residual = clean_display - denoised_display
         noise_scale = torch.stack([noise, predicted_noise], dim=0).square().mean(dim=(0, 2, 3, 4)).sqrt().max()
+        residual_scale = residual.square().mean(dim=(1, 2, 3)).sqrt().max().mul(3.0).clamp_min(1e-6)
         rows = [
-            [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in clean_images],
-            [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in noisy_images],
-            [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in denoised],
-            [self._visualize_noise(image, noise_scale).cpu() for image in predicted_noise],
+            [image.cpu() for image in clean_display],
+            [image.cpu() for image in noisy_display],
+            [image.cpu() for image in denoised_display],
+            [self._visualize_signed_field(image, residual_scale).cpu() for image in residual],
+            [self._visualize_signed_field(image, noise_scale).cpu() for image in predicted_noise],
         ]
         canvas = self._build_preview_canvas(rows)
         caption = (
-            f"rows=clean/noisy/denoised/predicted_noise, cols=validation samples 0..{num_samples - 1}, "
-            f"epsilon={epsilon[0].item():.4g}, score_target={self.config.score_target}"
+            "rows=clean/noisy/denoised/clean_minus_denoised/predicted_noise, "
+            f"cols=validation samples 0..{num_samples - 1}, "
+            f"epsilon={epsilon[0].item():.4g}, residual_scale={residual_scale.item():.4g}, "
+            f"score_target={self.config.score_target}"
         )
 
         experiment = self.logger.experiment
@@ -327,18 +335,26 @@ class ScorePretrainingModule(L.LightningModule):
                 score_target=self.config.score_target,
             )
 
+        clean_display = self._denormalize_image(repeated_clean).clamp(0.0, 1.0)
+        noisy_display = self._denormalize_image(noisy_images).clamp(0.0, 1.0)
+        denoised_display = self._denormalize_image(denoised).clamp(0.0, 1.0)
+        residual = clean_display - denoised_display
         noise_scale = torch.stack([base_noise, predicted_noise], dim=0).square().mean(dim=(0, 2, 3, 4)).sqrt().max()
-        base_display = self._denormalize_image(clean_image[0]).clamp(0.0, 1.0).cpu()
+        residual_scale = residual.square().mean(dim=(1, 2, 3)).sqrt().max().mul(3.0).clamp_min(1e-6)
+        base_display = clean_display[0].cpu()
         rows = [
             [base_display.clone() for _ in range(epsilon.shape[0])],
-            [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in noisy_images],
-            [self._denormalize_image(image).clamp(0.0, 1.0).cpu() for image in denoised],
-            [self._visualize_noise(image, noise_scale).cpu() for image in predicted_noise],
+            [image.cpu() for image in noisy_display],
+            [image.cpu() for image in denoised_display],
+            [self._visualize_signed_field(image, residual_scale).cpu() for image in residual],
+            [self._visualize_signed_field(image, noise_scale).cpu() for image in predicted_noise],
         ]
         canvas = self._build_preview_canvas(rows)
         caption = (
-            "rows=clean/noisy/denoised/predicted_noise, cols=epsilon sweep for validation sample 0, "
+            "rows=clean/noisy/denoised/clean_minus_denoised/predicted_noise, "
+            "cols=epsilon sweep for validation sample 0, "
             f"epsilons={[round(value.item(), 6) for value in epsilon]}, "
+            f"residual_scale={residual_scale.item():.4g}, "
             f"score_target={self.config.score_target}"
         )
 
