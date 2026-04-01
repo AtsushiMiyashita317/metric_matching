@@ -10,7 +10,11 @@ import torch
 
 from metric_matching.data import restore_image_range
 from metric_matching.models import MetricBasisNetwork, MetricFactorNetwork, ScoreNetwork
-from metric_matching.score_module import load_score_network_checkpoint, prediction_to_noise
+from metric_matching.score_module import (
+    load_score_network_checkpoint,
+    prediction_to_noise,
+    read_score_checkpoint_config,
+)
 
 
 @dataclass
@@ -36,6 +40,7 @@ class MetricMatchingConfig:
     metric_target: Literal["direction", "destination"] = "direction"
     score_training_mode: Literal["joint", "pretrained_frozen"] = "joint"
     pretrained_score_checkpoint: str | None = None
+    scale_input_by_sqrt_one_plus_epsilon: bool = False
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -68,6 +73,7 @@ class MetricMatchingModule(L.LightningModule):
             raise ValueError("pretrained_score_checkpoint is required when score_training_mode='pretrained_frozen'.")
         self.save_hyperparameters(asdict(config))
         self.loaded_score_checkpoint_path: str | None = None
+        self.loaded_score_scaling_mode: bool | None = None
         self.network: MetricFactorNetwork | None = None
         self.metric_network: MetricBasisNetwork | None = None
         self.score_network: ScoreNetwork | None = None
@@ -81,8 +87,12 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
+                scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
             )
         else:
+            score_checkpoint_config = read_score_checkpoint_config(
+                Path(self.config.pretrained_score_checkpoint)
+            )
             self.metric_network = MetricBasisNetwork(
                 image_size=config.image_size,
                 in_channels=config.image_channels,
@@ -92,6 +102,7 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
+                scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
             )
             self.score_network = ScoreNetwork(
                 image_size=config.image_size,
@@ -101,12 +112,16 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
+                scale_input_by_sqrt_one_plus_epsilon=bool(
+                    score_checkpoint_config["scale_input_by_sqrt_one_plus_epsilon"]
+                ),
             )
             checkpoint_metadata = load_score_network_checkpoint(
                 self.score_network,
                 checkpoint_path=Path(self.config.pretrained_score_checkpoint),
             )
             self.loaded_score_checkpoint_path = str(checkpoint_metadata["checkpoint_path"])
+            self.loaded_score_scaling_mode = bool(checkpoint_metadata["scale_input_by_sqrt_one_plus_epsilon"])
             self.score_network.requires_grad_(False)
             self.score_network.eval()
         self.example_input_array = (

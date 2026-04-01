@@ -563,6 +563,18 @@ def build_metric_matching_unet(
     )
 
 
+def scale_model_input(
+    image: th.Tensor,
+    epsilon: th.Tensor,
+    *,
+    scale_by_sqrt_one_plus_epsilon: bool,
+) -> th.Tensor:
+    if not scale_by_sqrt_one_plus_epsilon:
+        return image
+    scale = th.sqrt(1.0 + epsilon.clamp_min(0.0))[:, None, None, None]
+    return image / scale
+
+
 class ScoreNetwork(nn.Module):
     def __init__(
         self,
@@ -575,10 +587,12 @@ class ScoreNetwork(nn.Module):
         attention_downsample_factor: int = 4,
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
+        scale_input_by_sqrt_one_plus_epsilon: bool = False,
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
+        self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -592,7 +606,12 @@ class ScoreNetwork(nn.Module):
         )
 
     def forward(self, image: th.Tensor, epsilon: th.Tensor) -> th.Tensor:
-        return self.unet(image, th.log(epsilon.clamp_min(1e-8)))
+        scaled_image = scale_model_input(
+            image,
+            epsilon,
+            scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
+        )
+        return self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
 
 
 class MetricBasisNetwork(nn.Module):
@@ -608,11 +627,13 @@ class MetricBasisNetwork(nn.Module):
         attention_downsample_factor: int = 4,
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
+        scale_input_by_sqrt_one_plus_epsilon: bool = False,
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
         self.rank = rank
+        self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -626,7 +647,12 @@ class MetricBasisNetwork(nn.Module):
         )
 
     def forward(self, image: th.Tensor, epsilon: th.Tensor) -> th.Tensor:
-        out = self.unet(image, th.log(epsilon.clamp_min(1e-8)))
+        scaled_image = scale_model_input(
+            image,
+            epsilon,
+            scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
+        )
+        out = self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
         batch_size, _, height, width = out.shape
         return out.view(batch_size, self.rank, self.in_channels, height, width)
 
@@ -644,11 +670,13 @@ class MetricFactorNetwork(nn.Module):
         attention_downsample_factor: int = 4,
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
+        scale_input_by_sqrt_one_plus_epsilon: bool = False,
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
         self.rank = rank
+        self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -662,7 +690,12 @@ class MetricFactorNetwork(nn.Module):
         )
 
     def forward(self, image: th.Tensor, epsilon: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
-        out = self.unet(image, th.log(epsilon.clamp_min(1e-8)))
+        scaled_image = scale_model_input(
+            image,
+            epsilon,
+            scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
+        )
+        out = self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
         batch_size, _, height, width = out.shape
         out = out.view(batch_size, self.rank + 1, self.in_channels, height, width)
         metric_factors = out[:, : self.rank]

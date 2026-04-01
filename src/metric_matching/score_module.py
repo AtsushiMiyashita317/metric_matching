@@ -59,11 +59,9 @@ def load_score_network_checkpoint(
     network: ScoreNetwork,
     checkpoint_path: str | Path,
 ) -> dict[str, object]:
-    resolved_path = Path(checkpoint_path).expanduser().resolve()
-    checkpoint = torch.load(resolved_path, map_location="cpu")
-    raw_state_dict = checkpoint.get("state_dict", checkpoint)
-    if not isinstance(raw_state_dict, dict):
-        raise TypeError(f"Checkpoint at {resolved_path} does not contain a valid state_dict.")
+    checkpoint_config = read_score_checkpoint_config(checkpoint_path)
+    resolved_path = checkpoint_config["checkpoint_path"]
+    raw_state_dict = checkpoint_config["state_dict"]
 
     candidate_state_dict = _match_prefixed_state_dict(
         raw_state_dict,
@@ -77,6 +75,7 @@ def load_score_network_checkpoint(
         )
     return {
         "checkpoint_path": str(resolved_path),
+        "scale_input_by_sqrt_one_plus_epsilon": checkpoint_config["scale_input_by_sqrt_one_plus_epsilon"],
         "checkpoint_keys": tuple(sorted(raw_state_dict.keys())),
     }
 
@@ -95,8 +94,29 @@ class ScorePretrainingConfig:
     epsilon_min: float = 1e-4
     epsilon_max: float = 5e-2
     score_target: Literal["noise", "mean"] = "noise"
+    scale_input_by_sqrt_one_plus_epsilon: bool = False
     preview_samples: int = 4
     preview_num_epsilons: int = 5
+
+
+def read_score_checkpoint_config(checkpoint_path: str | Path) -> dict[str, object]:
+    resolved_path = Path(checkpoint_path).expanduser().resolve()
+    checkpoint = torch.load(resolved_path, map_location="cpu")
+    raw_state_dict = checkpoint.get("state_dict", checkpoint)
+    if not isinstance(raw_state_dict, dict):
+        raise TypeError(f"Checkpoint at {resolved_path} does not contain a valid state_dict.")
+
+    hyper_parameters = checkpoint.get("hyper_parameters", {})
+    if not isinstance(hyper_parameters, dict):
+        hyper_parameters = {}
+
+    return {
+        "checkpoint_path": str(resolved_path),
+        "state_dict": raw_state_dict,
+        "scale_input_by_sqrt_one_plus_epsilon": bool(
+            hyper_parameters.get("scale_input_by_sqrt_one_plus_epsilon", False)
+        ),
+    }
 
 
 class ScorePretrainingModule(L.LightningModule):
@@ -117,6 +137,7 @@ class ScorePretrainingModule(L.LightningModule):
             attention_downsample_factor=config.attention_downsample_factor,
             use_output_bias=config.use_output_bias,
             output_bias_variance=config.output_bias_variance,
+            scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
         )
         self.example_input_array = (
             torch.randn(2, config.image_channels, config.image_size, config.image_size),

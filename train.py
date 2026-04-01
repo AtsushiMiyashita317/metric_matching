@@ -58,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["joint", "pretrained_frozen"],
     )
     parser.add_argument("--pretrained-score-checkpoint", type=str, default=None)
+    parser.add_argument("--scale-input", action="store_true")
     parser.add_argument("--preview-fields", type=int, default=8)
     parser.add_argument("--preview-samples", type=int, default=4)
     parser.add_argument("--preview-steps", type=int, default=7)
@@ -130,6 +131,7 @@ def main() -> None:
         metric_target=args.metric_target,
         score_training_mode=args.score_training_mode,
         pretrained_score_checkpoint=args.pretrained_score_checkpoint,
+        scale_input_by_sqrt_one_plus_epsilon=args.scale_input,
         preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,
         preview_steps=args.preview_steps,
