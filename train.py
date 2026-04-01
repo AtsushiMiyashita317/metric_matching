@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["joint", "pretrained_frozen"],
     )
     parser.add_argument("--pretrained-score-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--pretrained-metric-input",
+        type=str,
+        default="noisy",
+        choices=["noisy", "denoised", "[noisy, denoised]"],
+    )
     parser.add_argument("--scale-input", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
@@ -137,6 +143,7 @@ def main() -> None:
         metric_target=args.metric_target,
         score_training_mode=args.score_training_mode,
         pretrained_score_checkpoint=args.pretrained_score_checkpoint,
+        pretrained_metric_input=args.pretrained_metric_input,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_fields=args.preview_fields,

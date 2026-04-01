@@ -12,6 +12,7 @@ from metric_matching.data import restore_image_range
 from metric_matching.models import MetricBasisNetwork, MetricFactorNetwork, ScoreNetwork
 from metric_matching.score_module import (
     load_score_network_checkpoint,
+    prediction_to_denoised,
     prediction_to_noise,
     read_score_checkpoint_config,
 )
@@ -40,6 +41,7 @@ class MetricMatchingConfig:
     metric_target: Literal["direction", "destination"] = "direction"
     score_training_mode: Literal["joint", "pretrained_frozen"] = "joint"
     pretrained_score_checkpoint: str | None = None
+    pretrained_metric_input: Literal["noisy", "denoised", "[noisy, denoised]"] = "noisy"
     scale_input: bool = False
     epsilon_input_mode: Literal["log_clamp", "log_one_plus", "identity"] = "log_clamp"
     preview_fields: int = 8
@@ -72,6 +74,15 @@ class MetricMatchingModule(L.LightningModule):
             )
         if self.config.score_training_mode == "pretrained_frozen" and self.config.pretrained_score_checkpoint is None:
             raise ValueError("pretrained_score_checkpoint is required when score_training_mode='pretrained_frozen'.")
+        if self.config.pretrained_metric_input not in {"noisy", "denoised", "[noisy, denoised]"}:
+            raise ValueError(
+                "pretrained_metric_input must be one of {'noisy', 'denoised', '[noisy, denoised]'}, "
+                f"got {self.config.pretrained_metric_input}"
+            )
+        if self.uses_joint_score_prediction and self.config.pretrained_metric_input != "noisy":
+            raise ValueError(
+                "pretrained_metric_input is only supported when score_training_mode='pretrained_frozen'."
+            )
         self.save_hyperparameters(asdict(config))
         self.loaded_score_checkpoint_path: str | None = None
         self.loaded_score_scale_input: bool | None = None
@@ -96,9 +107,13 @@ class MetricMatchingModule(L.LightningModule):
             score_checkpoint_config = read_score_checkpoint_config(
                 Path(self.config.pretrained_score_checkpoint)
             )
+            metric_in_channels = self.config.image_channels
+            if self.config.pretrained_metric_input == "[noisy, denoised]":
+                metric_in_channels *= 2
             self.metric_network = MetricBasisNetwork(
                 image_size=config.image_size,
-                in_channels=config.image_channels,
+                in_channels=metric_in_channels,
+                data_channels=config.image_channels,
                 rank=config.rank,
                 base_channels=config.base_channels,
                 num_res_blocks=config.num_res_blocks,
@@ -150,12 +165,36 @@ class MetricMatchingModule(L.LightningModule):
         else:
             assert self.metric_network is not None
             assert self.score_network is not None
-            metric_basis_prediction = self.metric_network(image, epsilon)
             with torch.no_grad():
                 score_prediction = self.score_network(image, epsilon)
+                metric_image = self._build_metric_network_input(image, score_prediction, epsilon)
+            metric_basis_prediction = self.metric_network(metric_image, epsilon)
         score = self._prediction_to_score(score_prediction, image, epsilon)
         metric_basis = self._prediction_to_metric_basis(metric_basis_prediction, image, score, epsilon)
         return metric_basis, score
+
+    def _build_metric_network_input(
+        self,
+        noisy_images: torch.Tensor,
+        score_prediction: torch.Tensor,
+        epsilon: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.config.pretrained_metric_input == "noisy":
+            return noisy_images
+        denoised_images = prediction_to_denoised(
+            prediction=score_prediction,
+            noisy_images=noisy_images,
+            epsilon=epsilon,
+            score_target=self.config.score_target,
+        )
+        if self.config.pretrained_metric_input == "denoised":
+            return denoised_images
+        if self.config.pretrained_metric_input == "[noisy, denoised]":
+            return torch.cat([noisy_images, denoised_images], dim=1)
+        raise ValueError(
+            "Unsupported pretrained_metric_input="
+            f"{self.config.pretrained_metric_input!r}."
+        )
 
     def _forward_metric_single(self, image: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
         # image: [C, H, W], epsilon: [], returns metric_factors: [K, C, H, W]
@@ -235,12 +274,18 @@ class MetricMatchingModule(L.LightningModule):
         noisy_images = images + epsilon.sqrt()[:, None, None, None] * noise
         # metric_basis: [B, rank, C, H, W], score: [B, C, H, W]
         metric_basis, score = self.forward(noisy_images, epsilon)
+        denoised_images = noisy_images - epsilon.sqrt()[:, None, None, None] * score
+        delta = (images - denoised_images) / epsilon.sqrt()[:, None, None, None]
+
+        if self.config.detach_score_in_metric_loss:
+            denoised_images = denoised_images.detach()
+            delta = delta.detach()
 
         # metric_flat: [B, rank, C * H * W], score_flat/delta_flat: [B, C * H * W]
         metric_flat = metric_basis.flatten(start_dim=2)
         score_flat = score.flatten(start_dim=1)
-        metric_loss_score_flat = score_flat.detach() if self.config.detach_score_in_metric_loss else score_flat
         noise_flat = noise.flatten(start_dim=1)
+        delta_flat = delta.flatten(start_dim=1)
         factor_rank = self.config.rank
         basis_rank = metric_flat.shape[1]
         data_dim = metric_flat.shape[2]
@@ -249,18 +294,18 @@ class MetricMatchingModule(L.LightningModule):
         # metric_gram: [B, rank, rank], metric_score_dot: [B, rank]
         metric_gram = torch.matmul(metric_flat, metric_flat.transpose(1, 2))
         metric_frob = metric_gram.square().sum(dim=(1, 2)) / normalization
-        score_gram = metric_loss_score_flat.square().sum(dim=1)
-        score_frob = score_gram.square() / normalization
-        metric_score_dot = torch.matmul(metric_flat, metric_loss_score_flat[:, :, None]).squeeze(2)
-        metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
-        frob_term = metric_frob + score_frob + metric_score
+        # score_gram = metric_loss_score_flat.square().sum(dim=1)
+        # score_frob = score_gram.square() / normalization
+        # metric_score_dot = torch.matmul(metric_flat, metric_loss_score_flat[:, :, None]).squeeze(2)
+        # metric_score = 2 * metric_score_dot.square().sum(dim=1) / normalization
+        frob_term = metric_frob
 
         # metric_delta_dot: [B, rank], score_delta_dot/target_sq_norm: [B]
-        metric_delta_dot = torch.matmul(metric_flat, noise_flat[:, :, None]).squeeze(2)
+        metric_delta_dot = torch.matmul(metric_flat, delta_flat[:, :, None]).squeeze(2)
         metric_delta = 2 * metric_delta_dot.square().sum(dim=1) / normalization
-        score_delta_dot = (metric_loss_score_flat * noise_flat).sum(dim=1)
-        score_delta = 2 * score_delta_dot.square() / normalization
-        alignment_term = metric_delta + score_delta
+        # score_delta_dot = (metric_loss_score_flat * noise_flat).sum(dim=1)
+        # score_delta = 2 * score_delta_dot.square() / normalization
+        alignment_term = metric_delta
 
         metric_gram3 = torch.matmul(metric_gram, metric_flat)
         metric_frob3 = metric_gram3.square().sum(dim=(1, 2)) / normalization
@@ -268,11 +313,10 @@ class MetricMatchingModule(L.LightningModule):
         metric_frob4 = metric_gram4.square().sum(dim=(1, 2)) / normalization
         projection_term = metric_frob - 2 * metric_frob3 + metric_frob4
 
-        target_sq_norm = noise_flat.square().sum(dim=1)
+        target_sq_norm = delta_flat.square().sum(dim=1)
         target_term = target_sq_norm.square() / normalization
         tangent_dim = metric_flat.square().sum(dim=(1, 2))
-        score_norm = metric_loss_score_flat.square().sum(dim=1)
-        reg_term = self.config.tikhonov_lambda * 2.0 * (tangent_dim + score_norm) / normalization
+        reg_term = self.config.tikhonov_lambda * 2.0 * tangent_dim / normalization
         score_matching_term = (score_flat - noise_flat).square().mean(dim=1)
 
         metric_loss = (frob_term + reg_term - alignment_term).mean()

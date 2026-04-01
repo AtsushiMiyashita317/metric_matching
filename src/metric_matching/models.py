@@ -644,6 +644,7 @@ class MetricBasisNetwork(nn.Module):
         self,
         image_size: int = 64,
         in_channels: int = 3,
+        data_channels: int | None = None,
         rank: int = 100,
         base_channels: int = 64,
         cond_dim: int = 256,
@@ -657,14 +658,17 @@ class MetricBasisNetwork(nn.Module):
     ) -> None:
         super().__init__()
         del cond_dim
+        if data_channels is None:
+            data_channels = in_channels
         self.in_channels = in_channels
+        self.data_channels = data_channels
         self.rank = rank
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
-            out_channels=in_channels * rank,
+            out_channels=data_channels * rank,
             base_channels=base_channels,
             num_res_blocks=num_res_blocks,
             channel_mults=channel_mults,
@@ -685,7 +689,7 @@ class MetricBasisNetwork(nn.Module):
         )
         out = self.unet(scaled_image, transformed_epsilon)
         batch_size, _, height, width = out.shape
-        return out.view(batch_size, self.rank, self.in_channels, height, width)
+        return out.view(batch_size, self.rank, self.data_channels, height, width)
 
 
 class MetricFactorNetwork(nn.Module):
