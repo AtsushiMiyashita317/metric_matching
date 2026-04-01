@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["noise", "mean"],
     )
     parser.add_argument("--scale-input", action="store_true")
+    parser.add_argument(
+        "--eps-input-mode",
+        type=str,
+        default="log_clamp",
+        choices=["log_clamp", "log_one_plus", "identity"],
+    )
     parser.add_argument("--preview-samples", type=int, default=4)
     parser.add_argument("--preview-num-epsilons", type=int, default=5)
     parser.add_argument("--val-fraction", type=float, default=0.05)
@@ -101,6 +107,7 @@ def main() -> None:
         epsilon_max=args.epsilon_max,
         score_target=args.score_target,
         scale_input_by_sqrt_one_plus_epsilon=args.scale_input,
+        epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,
         preview_num_epsilons=args.preview_num_epsilons,
     )

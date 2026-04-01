@@ -8,6 +8,8 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
+EPSILON_INPUT_MODES = ("log_clamp", "log_one_plus", "identity")
+
 
 def checkpoint(function, inputs, params, flag):
     del params, flag
@@ -575,6 +577,23 @@ def scale_model_input(
     return image / scale
 
 
+def transform_epsilon_for_unet(
+    epsilon: th.Tensor,
+    *,
+    epsilon_input_mode: str,
+) -> th.Tensor:
+    if epsilon_input_mode == "log_clamp":
+        return th.log(epsilon.clamp_min(1e-8))
+    if epsilon_input_mode == "log_one_plus":
+        return th.log1p(epsilon)
+    if epsilon_input_mode == "identity":
+        return epsilon
+    raise ValueError(
+        f"Unsupported epsilon_input_mode={epsilon_input_mode!r}. "
+        f"Expected one of {EPSILON_INPUT_MODES}."
+    )
+
+
 class ScoreNetwork(nn.Module):
     def __init__(
         self,
@@ -588,11 +607,13 @@ class ScoreNetwork(nn.Module):
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
         scale_input_by_sqrt_one_plus_epsilon: bool = False,
+        epsilon_input_mode: str = "log_clamp",
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
         self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
+        self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -611,7 +632,11 @@ class ScoreNetwork(nn.Module):
             epsilon,
             scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
         )
-        return self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
+        transformed_epsilon = transform_epsilon_for_unet(
+            epsilon,
+            epsilon_input_mode=self.epsilon_input_mode,
+        )
+        return self.unet(scaled_image, transformed_epsilon)
 
 
 class MetricBasisNetwork(nn.Module):
@@ -628,12 +653,14 @@ class MetricBasisNetwork(nn.Module):
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
         scale_input_by_sqrt_one_plus_epsilon: bool = False,
+        epsilon_input_mode: str = "log_clamp",
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
         self.rank = rank
         self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
+        self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -652,7 +679,11 @@ class MetricBasisNetwork(nn.Module):
             epsilon,
             scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
         )
-        out = self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
+        transformed_epsilon = transform_epsilon_for_unet(
+            epsilon,
+            epsilon_input_mode=self.epsilon_input_mode,
+        )
+        out = self.unet(scaled_image, transformed_epsilon)
         batch_size, _, height, width = out.shape
         return out.view(batch_size, self.rank, self.in_channels, height, width)
 
@@ -671,12 +702,14 @@ class MetricFactorNetwork(nn.Module):
         use_output_bias: bool = True,
         output_bias_variance: float = 1e-3,
         scale_input_by_sqrt_one_plus_epsilon: bool = False,
+        epsilon_input_mode: str = "log_clamp",
     ) -> None:
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
         self.rank = rank
         self.scale_input_by_sqrt_one_plus_epsilon = scale_input_by_sqrt_one_plus_epsilon
+        self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -695,7 +728,11 @@ class MetricFactorNetwork(nn.Module):
             epsilon,
             scale_by_sqrt_one_plus_epsilon=self.scale_input_by_sqrt_one_plus_epsilon,
         )
-        out = self.unet(scaled_image, th.log(epsilon.clamp_min(1e-8)))
+        transformed_epsilon = transform_epsilon_for_unet(
+            epsilon,
+            epsilon_input_mode=self.epsilon_input_mode,
+        )
+        out = self.unet(scaled_image, transformed_epsilon)
         batch_size, _, height, width = out.shape
         out = out.view(batch_size, self.rank + 1, self.in_channels, height, width)
         metric_factors = out[:, : self.rank]

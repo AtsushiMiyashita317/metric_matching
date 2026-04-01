@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pretrained-score-checkpoint", type=str, default=None)
     parser.add_argument("--scale-input", action="store_true")
+    parser.add_argument(
+        "--eps-input-mode",
+        type=str,
+        default="log_clamp",
+        choices=["log_clamp", "log_one_plus", "identity"],
+    )
     parser.add_argument("--preview-fields", type=int, default=8)
     parser.add_argument("--preview-samples", type=int, default=4)
     parser.add_argument("--preview-steps", type=int, default=7)
@@ -132,6 +138,7 @@ def main() -> None:
         score_training_mode=args.score_training_mode,
         pretrained_score_checkpoint=args.pretrained_score_checkpoint,
         scale_input_by_sqrt_one_plus_epsilon=args.scale_input,
+        epsilon_input_mode=args.eps_input_mode,
         preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,
         preview_steps=args.preview_steps,
