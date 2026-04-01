@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Literal
 
 import lightning as L
@@ -8,7 +9,8 @@ import numpy as np
 import torch
 
 from metric_matching.data import restore_image_range
-from metric_matching.models import MetricFactorNetwork
+from metric_matching.models import MetricBasisNetwork, MetricFactorNetwork, ScoreNetwork
+from metric_matching.score_module import load_score_network_checkpoint, prediction_to_noise
 
 
 @dataclass
@@ -32,6 +34,8 @@ class MetricMatchingConfig:
     detach_score_in_metric_loss: bool = False
     score_target: Literal["noise", "mean"] = "noise"
     metric_target: Literal["direction", "destination"] = "direction"
+    score_training_mode: Literal["joint", "pretrained_frozen"] = "joint"
+    pretrained_score_checkpoint: str | None = None
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -55,23 +59,81 @@ class MetricMatchingModule(L.LightningModule):
                 "metric_target must be one of {'direction', 'destination'}, "
                 f"got {self.config.metric_target}"
             )
+        if self.config.score_training_mode not in {"joint", "pretrained_frozen"}:
+            raise ValueError(
+                "score_training_mode must be one of {'joint', 'pretrained_frozen'}, "
+                f"got {self.config.score_training_mode}"
+            )
+        if self.config.score_training_mode == "pretrained_frozen" and self.config.pretrained_score_checkpoint is None:
+            raise ValueError("pretrained_score_checkpoint is required when score_training_mode='pretrained_frozen'.")
         self.save_hyperparameters(asdict(config))
-        self.network = MetricFactorNetwork(
-            in_channels=config.image_channels,
-            rank=config.rank,
-            base_channels=config.base_channels,
-            num_res_blocks=config.num_res_blocks,
-            attention_downsample_factor=config.attention_downsample_factor,
-            use_output_bias=config.use_output_bias,
-            output_bias_variance=config.output_bias_variance,
-        )
+        self.loaded_score_checkpoint_path: str | None = None
+        self.network: MetricFactorNetwork | None = None
+        self.metric_network: MetricBasisNetwork | None = None
+        self.score_network: ScoreNetwork | None = None
+        if self.uses_joint_score_prediction:
+            self.network = MetricFactorNetwork(
+                image_size=config.image_size,
+                in_channels=config.image_channels,
+                rank=config.rank,
+                base_channels=config.base_channels,
+                num_res_blocks=config.num_res_blocks,
+                attention_downsample_factor=config.attention_downsample_factor,
+                use_output_bias=config.use_output_bias,
+                output_bias_variance=config.output_bias_variance,
+            )
+        else:
+            self.metric_network = MetricBasisNetwork(
+                image_size=config.image_size,
+                in_channels=config.image_channels,
+                rank=config.rank,
+                base_channels=config.base_channels,
+                num_res_blocks=config.num_res_blocks,
+                attention_downsample_factor=config.attention_downsample_factor,
+                use_output_bias=config.use_output_bias,
+                output_bias_variance=config.output_bias_variance,
+            )
+            self.score_network = ScoreNetwork(
+                image_size=config.image_size,
+                in_channels=config.image_channels,
+                base_channels=config.base_channels,
+                num_res_blocks=config.num_res_blocks,
+                attention_downsample_factor=config.attention_downsample_factor,
+                use_output_bias=config.use_output_bias,
+                output_bias_variance=config.output_bias_variance,
+            )
+            checkpoint_metadata = load_score_network_checkpoint(
+                self.score_network,
+                checkpoint_path=Path(self.config.pretrained_score_checkpoint),
+            )
+            self.loaded_score_checkpoint_path = str(checkpoint_metadata["checkpoint_path"])
+            self.score_network.requires_grad_(False)
+            self.score_network.eval()
         self.example_input_array = (
             torch.randn(2, config.image_channels, config.image_size, config.image_size),
             torch.full((2,), 1e-2),
         )
 
+    @property
+    def uses_joint_score_prediction(self) -> bool:
+        return self.config.score_training_mode == "joint"
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if not self.uses_joint_score_prediction and self.score_network is not None:
+            self.score_network.eval()
+        return self
+
     def forward(self, image: torch.Tensor, epsilon: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        metric_basis_prediction, score_prediction = self.network(image, epsilon)
+        if self.uses_joint_score_prediction:
+            assert self.network is not None
+            metric_basis_prediction, score_prediction = self.network(image, epsilon)
+        else:
+            assert self.metric_network is not None
+            assert self.score_network is not None
+            metric_basis_prediction = self.metric_network(image, epsilon)
+            with torch.no_grad():
+                score_prediction = self.score_network(image, epsilon)
         score = self._prediction_to_score(score_prediction, image, epsilon)
         metric_basis = self._prediction_to_metric_basis(metric_basis_prediction, image, score, epsilon)
         return metric_basis, score
@@ -120,9 +182,12 @@ class MetricMatchingModule(L.LightningModule):
         noisy_images: torch.Tensor,
         epsilon: torch.Tensor,
     ) -> torch.Tensor:
-        if self.config.score_target == "noise":
-            return prediction
-        return (prediction - noisy_images) / epsilon.sqrt()[:, None, None, None]
+        return prediction_to_noise(
+            prediction=prediction,
+            noisy_images=noisy_images,
+            epsilon=epsilon,
+            score_target=self.config.score_target,
+        )
 
     def _prediction_to_metric_basis(
         self,
@@ -194,7 +259,8 @@ class MetricMatchingModule(L.LightningModule):
         metric_loss = (frob_term + reg_term - alignment_term).mean()
         score_loss = self.config.score_matching_weight * score_matching_term.mean()
         projection_loss = self.config.projection_weight * projection_term.mean()
-        loss = metric_loss + score_loss + projection_loss
+        optimized_score_loss = score_loss if self.uses_joint_score_prediction else torch.zeros_like(score_loss)
+        loss = metric_loss + optimized_score_loss + projection_loss
         target_norm = (target_sq_norm / data_dim).mean()
         factor_norm = metric_flat[:, :factor_rank].square().sum(dim=(1, 2)).div(factor_rank * data_dim).mean()
         mean_offset_norm = metric_flat[:, factor_rank:].square().sum(dim=(1, 2)).div(data_dim).mean()
@@ -202,6 +268,7 @@ class MetricMatchingModule(L.LightningModule):
         metrics = {
             "metric_loss": metric_loss.detach(),
             "score_matching_loss": score_loss.detach(),
+            "optimized_score_matching_loss": optimized_score_loss.detach(),
             "projection_loss": projection_loss.detach(),
             "frob_term": frob_term.mean().detach(),
             "alignment_term": alignment_term.mean().detach(),
@@ -220,6 +287,10 @@ class MetricMatchingModule(L.LightningModule):
             "loss_scale_denominator": torch.tensor(normalization, device=images.device),
             "score_mode": torch.tensor(
                 0.0 if self.config.score_target == "noise" else 1.0,
+                device=images.device,
+            ),
+            "score_training_mode": torch.tensor(
+                0.0 if self.uses_joint_score_prediction else 1.0,
                 device=images.device,
             ),
             "metric_mode": torch.tensor(
@@ -689,7 +760,7 @@ class MetricMatchingModule(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
-            self.parameters(),
+            [parameter for parameter in self.parameters() if parameter.requires_grad],
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )

@@ -527,9 +527,78 @@ class UNetModel(nn.Module):
         return h
 
 
-class MetricFactorNetwork(nn.Module):
+def build_metric_matching_unet(
+    *,
+    image_size: int,
+    in_channels: int,
+    out_channels: int,
+    base_channels: int,
+    num_res_blocks: int,
+    channel_mults: tuple[int, ...],
+    attention_downsample_factor: int,
+    use_output_bias: bool,
+    output_bias_variance: float,
+) -> UNetModel:
+    return UNetModel(
+        image_size=image_size,
+        in_channels=in_channels,
+        model_channels=base_channels,
+        out_channels=out_channels,
+        num_res_blocks=num_res_blocks,
+        attention_resolutions={attention_downsample_factor},
+        dropout=0.0,
+        channel_mult=channel_mults,
+        conv_resample=True,
+        dims=2,
+        num_classes=None,
+        use_checkpoint=False,
+        num_heads=1,
+        num_head_channels=-1,
+        num_heads_upsample=-1,
+        use_scale_shift_norm=True,
+        resblock_updown=True,
+        use_new_attention_order=False,
+        use_output_bias=use_output_bias,
+        output_bias_variance=output_bias_variance,
+    )
+
+
+class ScoreNetwork(nn.Module):
     def __init__(
         self,
+        image_size: int = 64,
+        in_channels: int = 3,
+        base_channels: int = 64,
+        cond_dim: int = 256,
+        num_res_blocks: int = 2,
+        channel_mults: tuple[int, ...] = (1, 2, 2),
+        attention_downsample_factor: int = 4,
+        use_output_bias: bool = True,
+        output_bias_variance: float = 1e-3,
+    ) -> None:
+        super().__init__()
+        del cond_dim
+        self.in_channels = in_channels
+        self.unet = build_metric_matching_unet(
+            image_size=image_size,
+            in_channels=in_channels,
+            out_channels=in_channels,
+            base_channels=base_channels,
+            num_res_blocks=num_res_blocks,
+            channel_mults=channel_mults,
+            attention_downsample_factor=attention_downsample_factor,
+            use_output_bias=use_output_bias,
+            output_bias_variance=output_bias_variance,
+        )
+
+    def forward(self, image: th.Tensor, epsilon: th.Tensor) -> th.Tensor:
+        return self.unet(image, th.log(epsilon.clamp_min(1e-8)))
+
+
+class MetricBasisNetwork(nn.Module):
+    def __init__(
+        self,
+        image_size: int = 64,
         in_channels: int = 3,
         rank: int = 100,
         base_channels: int = 64,
@@ -544,25 +613,50 @@ class MetricFactorNetwork(nn.Module):
         del cond_dim
         self.in_channels = in_channels
         self.rank = rank
-        self.unet = UNetModel(
-            image_size=64,
+        self.unet = build_metric_matching_unet(
+            image_size=image_size,
             in_channels=in_channels,
-            model_channels=base_channels,
-            out_channels=in_channels * (rank + 1),
+            out_channels=in_channels * rank,
+            base_channels=base_channels,
             num_res_blocks=num_res_blocks,
-            attention_resolutions={attention_downsample_factor},
-            dropout=0.0,
-            channel_mult=channel_mults,
-            conv_resample=True,
-            dims=2,
-            num_classes=None,
-            use_checkpoint=False,
-            num_heads=1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=False,
+            channel_mults=channel_mults,
+            attention_downsample_factor=attention_downsample_factor,
+            use_output_bias=use_output_bias,
+            output_bias_variance=output_bias_variance,
+        )
+
+    def forward(self, image: th.Tensor, epsilon: th.Tensor) -> th.Tensor:
+        out = self.unet(image, th.log(epsilon.clamp_min(1e-8)))
+        batch_size, _, height, width = out.shape
+        return out.view(batch_size, self.rank, self.in_channels, height, width)
+
+
+class MetricFactorNetwork(nn.Module):
+    def __init__(
+        self,
+        image_size: int = 64,
+        in_channels: int = 3,
+        rank: int = 100,
+        base_channels: int = 64,
+        cond_dim: int = 256,
+        num_res_blocks: int = 2,
+        channel_mults: tuple[int, ...] = (1, 2, 2),
+        attention_downsample_factor: int = 4,
+        use_output_bias: bool = True,
+        output_bias_variance: float = 1e-3,
+    ) -> None:
+        super().__init__()
+        del cond_dim
+        self.in_channels = in_channels
+        self.rank = rank
+        self.unet = build_metric_matching_unet(
+            image_size=image_size,
+            in_channels=in_channels,
+            out_channels=in_channels * (rank + 1),
+            base_channels=base_channels,
+            num_res_blocks=num_res_blocks,
+            channel_mults=channel_mults,
+            attention_downsample_factor=attention_downsample_factor,
             use_output_bias=use_output_bias,
             output_bias_variance=output_bias_variance,
         )

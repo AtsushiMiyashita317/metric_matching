@@ -15,18 +15,17 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
 from metric_matching.data import Shapes3DDataModule
-from metric_matching.lightning_module import MetricMatchingConfig, MetricMatchingModule
+from metric_matching.score_module import ScorePretrainingConfig, ScorePretrainingModule
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train Riemannian Metric Matching on 3dshapes.")
+    parser = argparse.ArgumentParser(description="Pretrain a score predictor on 3dshapes.")
     parser.add_argument("--data-path", type=str, default="3dshapes.h5")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--rank", type=int, default=32)
     parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument("--num-res-blocks", type=int, default=2)
     parser.add_argument("--attention-downsample-factor", type=int, default=4)
@@ -34,35 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-bias-variance", type=float, default=1e-3)
     parser.add_argument("--epsilon-min", type=float, default=1e-4)
     parser.add_argument("--epsilon-max", type=float, default=5e-2)
-    parser.add_argument("--copies-per-sample", type=int, default=1)
-    parser.add_argument("--tikhonov-lambda", type=float, default=1e-4)
-    parser.add_argument("--score-matching-weight", type=float, default=1.0)
-    parser.add_argument("--projection-weight", type=float, default=0.0)
-    parser.add_argument("--detach-score-in-metric-loss", action="store_true")
     parser.add_argument(
         "--score-target",
         type=str,
         default="noise",
         choices=["noise", "mean"],
     )
-    parser.add_argument(
-        "--metric-target",
-        type=str,
-        default="direction",
-        choices=["direction", "destination"],
-    )
-    parser.add_argument(
-        "--score-training-mode",
-        type=str,
-        default="joint",
-        choices=["joint", "pretrained_frozen"],
-    )
-    parser.add_argument("--pretrained-score-checkpoint", type=str, default=None)
-    parser.add_argument("--preview-fields", type=int, default=8)
     parser.add_argument("--preview-samples", type=int, default=4)
-    parser.add_argument("--preview-steps", type=int, default=7)
-    parser.add_argument("--preview-scale", type=float, default=0.25)
-    parser.add_argument("--preview-rk4-substeps", type=int, default=8)
+    parser.add_argument("--preview-num-epsilons", type=int, default=5)
     parser.add_argument("--val-fraction", type=float, default=0.05)
     parser.add_argument("--disable-normalize", action="store_true")
     parser.add_argument("--stats-samples", type=int, default=8192)
@@ -70,8 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--enable-color-interpolation", action="store_true")
-    parser.add_argument("--project", type=str, default="metric-matching")
-    parser.add_argument("--run-name", type=str, default="3dshapes-rmm")
+    parser.add_argument("--project", type=str, default="score-matching")
+    parser.add_argument("--run-name", type=str, default="3dshapes-score-pretrain")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
     parser.add_argument("--log-model", action="store_true")
     parser.add_argument("--accelerator", type=str, default="auto")
@@ -108,10 +86,9 @@ def main() -> None:
     if height != width:
         raise ValueError(f"Only square images are supported, received {(channels, height, width)}")
 
-    config = MetricMatchingConfig(
+    config = ScorePretrainingConfig(
         image_channels=channels,
         image_size=height,
-        rank=args.rank,
         base_channels=args.base_channels,
         num_res_blocks=args.num_res_blocks,
         attention_downsample_factor=args.attention_downsample_factor,
@@ -121,22 +98,11 @@ def main() -> None:
         weight_decay=args.weight_decay,
         epsilon_min=args.epsilon_min,
         epsilon_max=args.epsilon_max,
-        copies_per_sample=args.copies_per_sample,
-        tikhonov_lambda=args.tikhonov_lambda,
-        score_matching_weight=args.score_matching_weight,
-        projection_weight=args.projection_weight,
-        detach_score_in_metric_loss=args.detach_score_in_metric_loss,
         score_target=args.score_target,
-        metric_target=args.metric_target,
-        score_training_mode=args.score_training_mode,
-        pretrained_score_checkpoint=args.pretrained_score_checkpoint,
-        preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,
-        preview_steps=args.preview_steps,
-        preview_scale=args.preview_scale,
-        preview_rk4_substeps=args.preview_rk4_substeps,
+        preview_num_epsilons=args.preview_num_epsilons,
     )
-    model = MetricMatchingModule(config)
+    model = ScorePretrainingModule(config)
 
     logger = None
     if args.wandb_mode != "disabled":
@@ -170,7 +136,7 @@ def main() -> None:
             monitor="val/loss",
             mode="min",
             save_top_k=1,
-            filename="metric-matching-{epoch:02d}",
+            filename="score-pretrain-{epoch:02d}",
         ),
         LearningRateMonitor(logging_interval="epoch"),
     ]
