@@ -235,8 +235,7 @@ class Shapes3DDataset(Dataset):
             else np.asarray(indices, dtype=np.int64)
         )
         self.base_length = int(self.base_indices.shape[0])
-        interpolation_multiplier = 1 if self.enable_color_interpolation else 0
-        self.length = self.base_length * (1 + interpolation_multiplier)
+        self.length = self.base_length
         if self.enable_color_interpolation and self.labels is None:
             raise ValueError("Color interpolation requires labels to be present in the dataset.")
 
@@ -274,21 +273,6 @@ class Shapes3DDataset(Dataset):
         step = float(values[1] - values[0])
         wrapped_position = (lower_factor_index + alpha) % len(values)
         return float(values[0] + step * wrapped_position)
-
-    def _build_original_sample(self, base_index: int) -> dict[str, torch.Tensor]:
-        image = self._image_to_tensor(self.images_chw[base_index])
-        sample = {
-            "image": image,
-            "is_interpolated": torch.tensor(False),
-            "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
-            "interpolation_alphas": torch.zeros(len(COLOR_FACTOR_INDICES), dtype=torch.float32),
-            "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
-            "source_index": torch.tensor(base_index, dtype=torch.int64),
-            "target_index": torch.tensor(base_index, dtype=torch.int64),
-        }
-        if self.labels is not None:
-            sample["label"] = torch.from_numpy(self.labels[base_index].copy())
-        return sample
 
     def _build_interpolated_sample(self, base_index: int) -> dict[str, torch.Tensor]:
         if self.storage.label_indices is None or self.storage.color_neighbor_grid is None:
@@ -355,14 +339,23 @@ class Shapes3DDataset(Dataset):
         if index < 0 or index >= self.length:
             raise IndexError(f"Index {index} is out of range for dataset of length {self.length}.")
 
-        if index < self.base_length:
-            base_index = int(self.base_indices[index])
-            return self._build_original_sample(base_index)
+        base_index = int(self.base_indices[index])
+        if self.enable_color_interpolation:
+            return self._build_interpolated_sample(base_index)
 
-        interpolation_index = index - self.base_length
-        base_slot = interpolation_index
-        base_index = int(self.base_indices[base_slot])
-        return self._build_interpolated_sample(base_index)
+        image = self._image_to_tensor(self.images_chw[base_index])
+        sample = {
+            "image": image,
+            "is_interpolated": torch.tensor(False),
+            "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
+            "interpolation_alphas": torch.zeros(len(COLOR_FACTOR_INDICES), dtype=torch.float32),
+            "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
+            "source_index": torch.tensor(base_index, dtype=torch.int64),
+            "target_index": torch.tensor(base_index, dtype=torch.int64),
+        }
+        if self.labels is not None:
+            sample["label"] = torch.from_numpy(self.labels[base_index].copy())
+        return sample
 
 
 class Shapes3DDataModule(L.LightningDataModule):
