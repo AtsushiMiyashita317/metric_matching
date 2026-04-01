@@ -75,7 +75,7 @@ def load_score_network_checkpoint(
         )
     return {
         "checkpoint_path": str(resolved_path),
-        "scale_input_by_sqrt_one_plus_epsilon": checkpoint_config["scale_input_by_sqrt_one_plus_epsilon"],
+        "scale_input": checkpoint_config["scale_input"],
         "epsilon_input_mode": checkpoint_config["epsilon_input_mode"],
         "checkpoint_keys": tuple(sorted(raw_state_dict.keys())),
     }
@@ -95,7 +95,7 @@ class ScorePretrainingConfig:
     epsilon_min: float = 1e-4
     epsilon_max: float = 5e-2
     score_target: Literal["noise", "mean"] = "noise"
-    scale_input_by_sqrt_one_plus_epsilon: bool = False
+    scale_input: bool = False
     epsilon_input_mode: Literal["log_clamp", "log_one_plus", "identity"] = "log_clamp"
     preview_samples: int = 4
     preview_num_epsilons: int = 5
@@ -115,9 +115,7 @@ def read_score_checkpoint_config(checkpoint_path: str | Path) -> dict[str, objec
     return {
         "checkpoint_path": str(resolved_path),
         "state_dict": raw_state_dict,
-        "scale_input_by_sqrt_one_plus_epsilon": bool(
-            hyper_parameters.get("scale_input_by_sqrt_one_plus_epsilon", False)
-        ),
+        "scale_input": bool(hyper_parameters.get("scale_input", False)),
         "epsilon_input_mode": str(
             hyper_parameters.get("epsilon_input_mode", "log_clamp")
         ),
@@ -142,7 +140,7 @@ class ScorePretrainingModule(L.LightningModule):
             attention_downsample_factor=config.attention_downsample_factor,
             use_output_bias=config.use_output_bias,
             output_bias_variance=config.output_bias_variance,
-            scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
+            scale_input=config.scale_input,
             epsilon_input_mode=config.epsilon_input_mode,
         )
         self.example_input_array = (

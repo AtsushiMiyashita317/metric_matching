@@ -40,7 +40,7 @@ class MetricMatchingConfig:
     metric_target: Literal["direction", "destination"] = "direction"
     score_training_mode: Literal["joint", "pretrained_frozen"] = "joint"
     pretrained_score_checkpoint: str | None = None
-    scale_input_by_sqrt_one_plus_epsilon: bool = False
+    scale_input: bool = False
     epsilon_input_mode: Literal["log_clamp", "log_one_plus", "identity"] = "log_clamp"
     preview_fields: int = 8
     preview_samples: int = 4
@@ -74,7 +74,7 @@ class MetricMatchingModule(L.LightningModule):
             raise ValueError("pretrained_score_checkpoint is required when score_training_mode='pretrained_frozen'.")
         self.save_hyperparameters(asdict(config))
         self.loaded_score_checkpoint_path: str | None = None
-        self.loaded_score_scaling_mode: bool | None = None
+        self.loaded_score_scale_input: bool | None = None
         self.loaded_score_epsilon_input_mode: str | None = None
         self.network: MetricFactorNetwork | None = None
         self.metric_network: MetricBasisNetwork | None = None
@@ -89,7 +89,7 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
-                scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
+                scale_input=config.scale_input,
                 epsilon_input_mode=config.epsilon_input_mode,
             )
         else:
@@ -105,7 +105,7 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
-                scale_input_by_sqrt_one_plus_epsilon=config.scale_input_by_sqrt_one_plus_epsilon,
+                scale_input=config.scale_input,
                 epsilon_input_mode=config.epsilon_input_mode,
             )
             self.score_network = ScoreNetwork(
@@ -116,9 +116,7 @@ class MetricMatchingModule(L.LightningModule):
                 attention_downsample_factor=config.attention_downsample_factor,
                 use_output_bias=config.use_output_bias,
                 output_bias_variance=config.output_bias_variance,
-                scale_input_by_sqrt_one_plus_epsilon=bool(
-                    score_checkpoint_config["scale_input_by_sqrt_one_plus_epsilon"]
-                ),
+                scale_input=bool(score_checkpoint_config["scale_input"]),
                 epsilon_input_mode=str(score_checkpoint_config["epsilon_input_mode"]),
             )
             checkpoint_metadata = load_score_network_checkpoint(
@@ -126,7 +124,7 @@ class MetricMatchingModule(L.LightningModule):
                 checkpoint_path=Path(self.config.pretrained_score_checkpoint),
             )
             self.loaded_score_checkpoint_path = str(checkpoint_metadata["checkpoint_path"])
-            self.loaded_score_scaling_mode = bool(checkpoint_metadata["scale_input_by_sqrt_one_plus_epsilon"])
+            self.loaded_score_scale_input = bool(checkpoint_metadata["scale_input"])
             self.loaded_score_epsilon_input_mode = str(checkpoint_metadata["epsilon_input_mode"])
             self.score_network.requires_grad_(False)
             self.score_network.eval()

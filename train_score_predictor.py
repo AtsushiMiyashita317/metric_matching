@@ -106,7 +106,7 @@ def main() -> None:
         epsilon_min=args.epsilon_min,
         epsilon_max=args.epsilon_max,
         score_target=args.score_target,
-        scale_input_by_sqrt_one_plus_epsilon=args.scale_input,
+        scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,
         preview_num_epsilons=args.preview_num_epsilons,
