@@ -363,7 +363,7 @@ class ScorePretrainingModule(L.LightningModule):
         clean_display = self._denormalize_image(repeated_clean).clamp(0.0, 1.0)
         noisy_display = self._denormalize_image(noisy_images).clamp(0.0, 1.0)
         denoised_display = self._denormalize_image(denoised).clamp(0.0, 1.0)
-        residual = clean_display - denoised_display
+        residual = (clean_display - denoised_display) / epsilon.sqrt()[:, None, None, None]
         noise_scale = torch.stack([base_noise, predicted_noise], dim=0).square().mean(dim=(0, 2, 3, 4)).sqrt().max()
         residual_scale = residual.square().mean(dim=(1, 2, 3)).sqrt().max().mul(3.0).clamp_min(1e-6)
         base_display = clean_display[0].cpu()
