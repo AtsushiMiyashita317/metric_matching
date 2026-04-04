@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-epochs", type=int, default=20)
     parser.add_argument("--denoiser-learning-rate", type=float, default=2e-3)
     parser.add_argument("--generator-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--denoiser-lr-alpha", type=float, default=0.666)
+    parser.add_argument("--generator-lr-alpha", type=float, default=1.0)
+    parser.add_argument("--denoiser-warmup-steps", type=int, default=0)
+    parser.add_argument("--generator-warmup-steps", type=int, default=5000)
+    parser.add_argument("--denoiser-lr-scale-steps", type=int, default=5000)
+    parser.add_argument("--generator-lr-scale-steps", type=int, default=5000)
     parser.add_argument("--denoiser-weight-decay", type=float, default=0.0)
     parser.add_argument("--generator-weight-decay", type=float, default=0.0)
     parser.add_argument("--rank", type=int, default=32)
@@ -107,6 +113,12 @@ def main() -> None:
         output_bias_variance=args.output_bias_variance,
         denoiser_learning_rate=args.denoiser_learning_rate,
         generator_learning_rate=args.generator_learning_rate,
+        denoiser_lr_alpha=args.denoiser_lr_alpha,
+        generator_lr_alpha=args.generator_lr_alpha,
+        denoiser_warmup_steps=args.denoiser_warmup_steps,
+        generator_warmup_steps=args.generator_warmup_steps,
+        denoiser_lr_scale_steps=args.denoiser_lr_scale_steps,
+        generator_lr_scale_steps=args.generator_lr_scale_steps,
         denoiser_weight_decay=args.denoiser_weight_decay,
         generator_weight_decay=args.generator_weight_decay,
         epsilon_min=args.epsilon_min,

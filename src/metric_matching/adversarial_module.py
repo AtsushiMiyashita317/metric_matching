@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 import lightning as L
@@ -31,6 +32,12 @@ class AdversarialMetricConfig:
     scale_input: bool = False
     epsilon_input_mode: str = "log_clamp"
     preview_samples: int = 4
+    denoiser_lr_alpha: float = 0.0
+    generator_lr_alpha: float = 0.0
+    denoiser_warmup_steps: int = 0
+    generator_warmup_steps: int = 0
+    denoiser_lr_scale_steps: int = 1
+    generator_lr_scale_steps: int = 1
 
 
 class AdversarialMetricModule(L.LightningModule):
@@ -320,6 +327,23 @@ class AdversarialMetricModule(L.LightningModule):
         )
         return log_eps.exp()
 
+    @staticmethod
+    def _warmup_decay_lr_lambda(
+        alpha: float,
+        warmup_steps: int,
+        scale_steps: int,
+    ) -> Callable[[int], float]:
+        def lr_lambda(step: int) -> float:
+            if warmup_steps > 0:
+                warmup = min(float(step + 1) / float(warmup_steps), 1.0)
+            else:
+                warmup = 1.0
+            effective_scale_steps = max(scale_steps, 1)
+            scaled_step = float(step) / float(effective_scale_steps)
+            return warmup * float((scaled_step + 1.0) ** (-alpha))
+
+        return lr_lambda
+
     def _visualize_signed_field(self, field: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         image = 0.5 + 0.5 * (field / scale.clamp_min(1e-6))
         return image.clamp(0.0, 1.0)
@@ -586,6 +610,7 @@ class AdversarialMetricModule(L.LightningModule):
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images = batch["image"]
         denoiser_optimizer, generator_optimizer = self.optimizers()
+        denoiser_scheduler, generator_scheduler = self.lr_schedulers()
         epsilon = self.sample_epsilon(images.shape[0], images.device).to(dtype=images.dtype)
         latent_white_noise = torch.randn(
             images.shape[0],
@@ -605,6 +630,8 @@ class AdversarialMetricModule(L.LightningModule):
         self.manual_backward(loss)
         denoiser_optimizer.step()
         generator_optimizer.step()
+        denoiser_scheduler.step()
+        generator_scheduler.step()
 
         self.log("train/loss", loss, prog_bar=True, batch_size=images.shape[0])
         self.log(
@@ -623,6 +650,8 @@ class AdversarialMetricModule(L.LightningModule):
             self.log(f"train/denoiser_{name}", value, prog_bar=False, batch_size=images.shape[0])
         for name, value in metrics.items():
             self.log(f"train/generator_{name}", value, prog_bar=False, batch_size=images.shape[0])
+        self.log("train/denoiser_lr", denoiser_optimizer.param_groups[0]["lr"], prog_bar=False, batch_size=images.shape[0])
+        self.log("train/generator_lr", generator_optimizer.param_groups[0]["lr"], prog_bar=False, batch_size=images.shape[0])
         return loss.detach()
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -669,14 +698,6 @@ class AdversarialMetricModule(L.LightningModule):
             basis_label="projector centered basis around mean image",
         )
 
-    def on_train_epoch_end(self) -> None:
-        schedulers = self.lr_schedulers()
-        if isinstance(schedulers, list):
-            for scheduler in schedulers:
-                scheduler.step()
-        else:
-            schedulers.step()
-
     def configure_optimizers(self):
         denoiser_optimizer = torch.optim.AdamW(
             list(self.projector.parameters()) + list(self.enhancer.parameters()) + [self.projector_log_var, self.enhancer_log_var],
@@ -689,12 +710,26 @@ class AdversarialMetricModule(L.LightningModule):
             weight_decay=self.config.generator_weight_decay,
             maximize=True,
         )
-        denoiser_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        denoiser_scheduler = torch.optim.lr_scheduler.LambdaLR(
             denoiser_optimizer,
-            T_max=max(self.trainer.max_epochs, 1),
+            lr_lambda=self._warmup_decay_lr_lambda(
+                alpha=self.config.denoiser_lr_alpha,
+                warmup_steps=self.config.denoiser_warmup_steps,
+                scale_steps=self.config.denoiser_lr_scale_steps,
+            ),
         )
-        generator_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        generator_scheduler = torch.optim.lr_scheduler.LambdaLR(
             generator_optimizer,
-            T_max=max(self.trainer.max_epochs, 1),
+            lr_lambda=self._warmup_decay_lr_lambda(
+                alpha=self.config.generator_lr_alpha,
+                warmup_steps=self.config.generator_warmup_steps,
+                scale_steps=self.config.generator_lr_scale_steps,
+            ),
         )
-        return [denoiser_optimizer, generator_optimizer], [denoiser_scheduler, generator_scheduler]
+        return (
+            [denoiser_optimizer, generator_optimizer],
+            [
+                {"scheduler": denoiser_scheduler, "interval": "step"},
+                {"scheduler": generator_scheduler, "interval": "step"},
+            ],
+        )
