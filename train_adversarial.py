@@ -15,8 +15,8 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
 from metric_matching.adversarial_module import (
-    AdversarialDenoisingConfig,
-    AdversarialDenoisingModule,
+    AdversarialMetricConfig,
+    AdversarialMetricModule,
 )
 from metric_matching.data import Shapes3DDataModule
 
@@ -39,9 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attention-downsample-factor", type=int, default=4)
     parser.add_argument("--disable-output-bias", action="store_true")
     parser.add_argument("--output-bias-variance", type=float, default=1e-3)
-    parser.add_argument("--epsilon-min", type=float, default=1e-4)
-    parser.add_argument("--epsilon-max", type=float, default=5e-2)
+    parser.add_argument("--epsilon-min", type=float, default=1e-6)
+    parser.add_argument("--epsilon-max", type=float, default=1e-4)
     parser.add_argument("--generator-loss-weight", type=float, default=1.0)
+    parser.add_argument("--covariance-regularization", type=float, default=1.0)
     parser.add_argument("--scale-input", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
@@ -95,7 +96,7 @@ def main() -> None:
     if height != width:
         raise ValueError(f"Only square images are supported, received {(channels, height, width)}")
 
-    config = AdversarialDenoisingConfig(
+    config = AdversarialMetricConfig(
         image_channels=channels,
         image_size=height,
         rank=args.rank,
@@ -111,11 +112,12 @@ def main() -> None:
         epsilon_min=args.epsilon_min,
         epsilon_max=args.epsilon_max,
         generator_loss_weight=args.generator_loss_weight,
+        covariance_regularization=args.covariance_regularization,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,
     )
-    model = AdversarialDenoisingModule(config)
+    model = AdversarialMetricModule(config)
 
     logger = None
     if args.wandb_mode != "disabled":
@@ -161,7 +163,7 @@ def main() -> None:
         logger=logger,
         callbacks=callbacks,
         precision=args.precision,
-        gradient_clip_val=args.gradient_clip_val,
+        # gradient_clip_val=args.gradient_clip_val,
         log_every_n_steps=10,
         deterministic=False,
     )

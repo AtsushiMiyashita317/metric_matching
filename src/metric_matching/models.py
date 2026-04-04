@@ -599,6 +599,7 @@ class ScoreNetwork(nn.Module):
         self,
         image_size: int = 64,
         in_channels: int = 3,
+        data_channels: int | None = None,
         base_channels: int = 64,
         cond_dim: int = 256,
         num_res_blocks: int = 2,
@@ -612,12 +613,15 @@ class ScoreNetwork(nn.Module):
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
+        if data_channels is None:
+            data_channels = in_channels
+        self.data_channels = data_channels
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
-            out_channels=in_channels,
+            out_channels=data_channels,
             base_channels=base_channels,
             num_res_blocks=num_res_blocks,
             channel_mults=channel_mults,
@@ -697,6 +701,7 @@ class MetricFactorNetwork(nn.Module):
         self,
         image_size: int = 64,
         in_channels: int = 3,
+        data_channels: int | None = None,
         rank: int = 100,
         base_channels: int = 64,
         cond_dim: int = 256,
@@ -711,13 +716,16 @@ class MetricFactorNetwork(nn.Module):
         super().__init__()
         del cond_dim
         self.in_channels = in_channels
+        if data_channels is None:
+            data_channels = in_channels
+        self.data_channels = data_channels
         self.rank = rank
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
-            out_channels=in_channels * (rank + 1),
+            out_channels=data_channels * (rank + 1),
             base_channels=base_channels,
             num_res_blocks=num_res_blocks,
             channel_mults=channel_mults,

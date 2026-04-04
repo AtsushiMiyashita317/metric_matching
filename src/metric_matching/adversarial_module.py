@@ -11,7 +11,7 @@ from metric_matching.models import MetricFactorNetwork, MetricBasisNetwork, Scor
 
 
 @dataclass
-class AdversarialDenoisingConfig:
+class AdversarialMetricConfig:
     image_channels: int = 3
     image_size: int = 64
     rank: int = 32
@@ -27,13 +27,14 @@ class AdversarialDenoisingConfig:
     epsilon_min: float = 1e-4
     epsilon_max: float = 5e-2
     generator_loss_weight: float = 1.0
+    covariance_regularization: float = 1e-6
     scale_input: bool = False
     epsilon_input_mode: str = "log_clamp"
     preview_samples: int = 4
 
 
-class AdversarialDenoisingModule(L.LightningModule):
-    def __init__(self, config: AdversarialDenoisingConfig) -> None:
+class AdversarialMetricModule(L.LightningModule):
+    def __init__(self, config: AdversarialMetricConfig) -> None:
         super().__init__()
         self.config = config
         self.save_hyperparameters(asdict(config))
@@ -55,9 +56,8 @@ class AdversarialDenoisingModule(L.LightningModule):
 
         self.enhancer = ScoreNetwork(
             image_size=config.image_size,
-            in_channels=config.image_channels,
+            in_channels=2*config.image_channels,
             data_channels=config.image_channels,
-            rank=config.rank,
             base_channels=config.base_channels,
             num_res_blocks=config.num_res_blocks,
             attention_downsample_factor=config.attention_downsample_factor,
@@ -81,7 +81,7 @@ class AdversarialDenoisingModule(L.LightningModule):
             epsilon_input_mode=config.epsilon_input_mode,
         )
 
-        self.projector_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
+        self.projector_log_var = torch.nn.Parameter(torch.tensor(-4.0), requires_grad=True)
         self.enhancer_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
 
         self.example_input_array = (
@@ -148,7 +148,7 @@ class AdversarialDenoisingModule(L.LightningModule):
             device=covariance.device,
             dtype=covariance.dtype,
         ).unsqueeze(0)
-        covariance = covariance + eye * 1e-6
+        covariance = covariance + eye * self.config.covariance_regularization
         covariance_inv = torch.linalg.inv(covariance)
 
         noisy_diff = noisy_images - mean
@@ -427,7 +427,7 @@ class AdversarialDenoisingModule(L.LightningModule):
         ]
         canvas = self._build_preview_canvas(rows)
         caption = (
-            "rows=clean/noisy/mean/projected/enhanced/projected_minus_clean/enhanced_minus_clean, "
+            "rows=clean/noisy/mean/projected/enhanced/noisy_minus_clean/mean_minus_clean/projected_minus_clean/enhanced_minus_clean, "
             f"cols=validation samples 0..{preview['clean_images'].shape[0] - 1}, "
             f"epsilon={epsilon[0].item():.4g}, "
             f"noisy_residual_scale={noisy_residual_scale.item():.4g}, "
@@ -477,7 +477,7 @@ class AdversarialDenoisingModule(L.LightningModule):
         ]
         canvas = self._build_preview_canvas(rows)
         caption = (
-            "rows=clean/noisy/mean/projected/enhanced/(projected_minus_clean)/(enhanced_minus_clean), "
+            "rows=clean/noisy/mean/projected/enhanced/noisy_minus_clean/mean_minus_clean/projected_minus_clean/enhanced_minus_clean, "
             "cols=epsilon sweep for validation sample 0, "
             f"epsilons={[round(value.item(), 6) for value in epsilon]}, "
             f"noisy_residual_scale={noisy_residual_scale.item():.4g}, "
@@ -596,47 +596,36 @@ class AdversarialDenoisingModule(L.LightningModule):
             dtype=images.dtype,
         )
 
-        self.toggle_optimizer(denoiser_optimizer)
         denoiser_optimizer.zero_grad()
-        denoiser_loss, denoiser_metrics = self._run_adversarial_round(
-            images,
-            epsilon=epsilon,
-            latent_white_noise=latent_white_noise,
-        )
-        self.manual_backward(denoiser_loss)
-        denoiser_optimizer.step()
-        self.untoggle_optimizer(denoiser_optimizer)
-
-        self.toggle_optimizer(generator_optimizer)
         generator_optimizer.zero_grad()
-        generator_reconstruction_loss, generator_metrics = self._run_adversarial_round(
+        loss, metrics = self._run_adversarial_round(
             images,
             epsilon=epsilon,
             latent_white_noise=latent_white_noise,
         )
-        generator_loss = -self.config.generator_loss_weight * generator_reconstruction_loss
-        self.manual_backward(generator_loss)
-        generator_optimizer.step()
-        self.untoggle_optimizer(generator_optimizer)
 
-        self.log("train/loss", denoiser_loss, prog_bar=True, batch_size=images.shape[0])
+        self.manual_backward(loss)
+        denoiser_optimizer.step()
+        generator_optimizer.step()
+
+        self.log("train/loss", loss, prog_bar=True, batch_size=images.shape[0])
         self.log(
             "train/denoiser_loss",
-            denoiser_loss.detach(),
+            loss.detach(),
             prog_bar=True,
             batch_size=images.shape[0],
         )
         self.log(
             "train/generator_loss",
-            generator_loss.detach(),
+            loss.detach(),
             prog_bar=True,
             batch_size=images.shape[0],
         )
-        for name, value in denoiser_metrics.items():
+        for name, value in metrics.items():
             self.log(f"train/denoiser_{name}", value, prog_bar=False, batch_size=images.shape[0])
-        for name, value in generator_metrics.items():
+        for name, value in metrics.items():
             self.log(f"train/generator_{name}", value, prog_bar=False, batch_size=images.shape[0])
-        return denoiser_loss.detach()
+        return loss.detach()
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
@@ -700,6 +689,7 @@ class AdversarialDenoisingModule(L.LightningModule):
             self.noise_generator.parameters(),
             lr=self.config.generator_learning_rate,
             weight_decay=self.config.generator_weight_decay,
+            maximize=True,
         )
         denoiser_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             denoiser_optimizer,
