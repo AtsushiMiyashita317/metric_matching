@@ -81,7 +81,7 @@ class AdversarialMetricModule(L.LightningModule):
             epsilon_input_mode=config.epsilon_input_mode,
         )
 
-        self.projector_log_var = torch.nn.Parameter(torch.tensor(-4.0), requires_grad=True)
+        self.projector_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
         self.enhancer_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
 
         self.example_input_array = (
@@ -141,6 +141,8 @@ class AdversarialMetricModule(L.LightningModule):
         epsilon: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         basis, mean = self.projector(noisy_images, epsilon)
+        # basis = basis + noisy_images.unsqueeze(1)
+        # mean = mean + noisy_images
         var_basis = basis - mean.unsqueeze(1)
         covariance = torch.einsum("bmchw,bnchw->bmn", var_basis, var_basis)
         eye = torch.eye(
@@ -151,18 +153,14 @@ class AdversarialMetricModule(L.LightningModule):
         covariance = covariance + eye * self.config.covariance_regularization
         covariance_inv = torch.linalg.inv(covariance)
 
-        noisy_diff = noisy_images - mean
-        noisy_latent = torch.einsum("bnchw,bchw->bn", var_basis, noisy_diff)
-        noisy_latent = torch.einsum("bmn,bn->bm", covariance_inv, noisy_latent)
-
-        clean_diff = images - mean
-        clean_latent = torch.einsum("bnchw,bchw->bn", var_basis, clean_diff)
-        clean_latent = torch.einsum("bmn,bn->bm", covariance_inv, clean_latent)
-        projected_images = mean + torch.einsum("bm,bmchw->bchw", clean_latent, var_basis)
+        diff = images - mean
+        latent = torch.einsum("bnchw,bchw->bn", var_basis, diff)
+        latent = torch.einsum("bmn,bn->bm", covariance_inv, latent)
+        projected_images = mean + torch.einsum("bm,bmchw->bchw", latent, var_basis)
 
         return projected_images, {
             "covariance": covariance,
-            "noisy_latent": noisy_latent,
+            "latent": latent,
             "mean": mean,
             "var_basis": var_basis,
         }
@@ -188,7 +186,7 @@ class AdversarialMetricModule(L.LightningModule):
         normal_dim = data_dim - tangent_dim
 
         covariance = aux["covariance"]
-        latent = aux["noisy_latent"]
+        latent = aux["latent"]
         project_trace_term = latent.square().sum(dim=1).div(epsilon * self.projector_log_var.exp())
         project_logdet_term = torch.logdet(covariance) + tangent_dim * (torch.log(epsilon) + self.projector_log_var)
         project_nll = 0.5 * project_trace_term + 0.5 * project_logdet_term
@@ -198,7 +196,7 @@ class AdversarialMetricModule(L.LightningModule):
         enhance_logdet_term = normal_dim * (torch.log(epsilon) + self.enhancer_log_var)
         enhance_nll = 0.5 * enhance_trace_term + 0.5 * enhance_logdet_term
 
-        nll = project_nll + enhance_nll
+        nll = (project_nll + enhance_nll) / data_dim
         return nll, {
             **aux,
             "project_nll": project_nll,
@@ -231,7 +229,7 @@ class AdversarialMetricModule(L.LightningModule):
             "generated_basis": generated["normalized_basis"],
             "projector_basis": projected["var_basis"],
             "covariance": projected["covariance"],
-            "noisy_latent": projected["noisy_latent"],
+            "latent": projected["latent"],
         }
 
     def _run_adversarial_round(
