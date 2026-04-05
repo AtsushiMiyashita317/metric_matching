@@ -32,6 +32,8 @@ class AdversarialMetricConfig:
     scale_input: bool = False
     epsilon_input_mode: str = "log_clamp"
     preview_samples: int = 4
+    std_atol: float = 1e-2
+    std_rtol: float = 1e-2
     denoiser_lr_alpha: float = 0.0
     generator_lr_alpha: float = 0.0
     denoiser_warmup_steps: int = 0
@@ -46,6 +48,19 @@ class AdversarialMetricModule(L.LightningModule):
         self.config = config
         self.save_hyperparameters(asdict(config))
         self.automatic_optimization = False
+
+        # self.projector_mean = ScoreNetwork(
+        #     image_size=config.image_size,
+        #     in_channels=config.image_channels,
+        #     data_channels=config.image_channels,
+        #     base_channels=config.base_channels,
+        #     num_res_blocks=config.num_res_blocks,
+        #     attention_downsample_factor=config.attention_downsample_factor,
+        #     use_output_bias=config.use_output_bias,
+        #     output_bias_variance=config.output_bias_variance,
+        #     scale_input=config.scale_input,
+        #     epsilon_input_mode=config.epsilon_input_mode,
+        # )
 
         self.projector = MetricFactorNetwork(
             image_size=config.image_size,
@@ -105,7 +120,7 @@ class AdversarialMetricModule(L.LightningModule):
         return torch.exp(torch.rand(batch_size, device=device) * (eps_max - eps_min) + eps_min)
 
     def _normalize_metric_basis(self, metric_basis: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        basis_rms = metric_basis.square().mean(dim=(2, 3, 4), keepdim=True).sqrt().clamp_min(1e-6)
+        basis_rms = metric_basis.square().sum(dim=(2, 3, 4), keepdim=True).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
         return metric_basis / basis_rms, basis_rms
     
     def _build_enhancer_input(
@@ -122,6 +137,7 @@ class AdversarialMetricModule(L.LightningModule):
         latent_white_noise: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         metric_basis_prediction = self.noise_generator(images, epsilon)
+        metric_basis_prediction = metric_basis_prediction - images.unsqueeze(1)
         normalized_basis, basis_rms = self._normalize_metric_basis(metric_basis_prediction)
         if latent_white_noise is None:
             latent_white_noise = torch.randn(
@@ -148,28 +164,41 @@ class AdversarialMetricModule(L.LightningModule):
         epsilon: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         basis, mean = self.projector(noisy_images, epsilon)
+        _, mean_detach = self.projector(noisy_images.detach(), epsilon)
+        var_basis = basis - mean.unsqueeze(1)
+        var_basis = self._normalize_metric_basis(var_basis)[0]
+
+        var_basis_flat = var_basis.flatten(start_dim=2)
+        _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
+        threshold = torch.maximum(self.config.std_atol * torch.ones_like(std[:,0]), self.config.std_rtol * std[:,0])
+        threshold = threshold.unsqueeze(1)
+        mask = std > threshold
+        basis = basis_flat.view_as(var_basis)
         # basis = basis + noisy_images.unsqueeze(1)
         # mean = mean + noisy_images
-        var_basis = basis - mean.unsqueeze(1)
-        covariance = torch.einsum("bmchw,bnchw->bmn", var_basis, var_basis)
-        eye = torch.eye(
-            covariance.shape[-1],
-            device=covariance.device,
-            dtype=covariance.dtype,
-        ).unsqueeze(0)
-        covariance = covariance + eye * self.config.covariance_regularization
-        covariance_inv = torch.linalg.inv(covariance)
+        # var_basis = basis - mean.unsqueeze(1)
+        # covariance = torch.einsum("bmchw,bnchw->bmn", var_basis, var_basis)
+        # eye = torch.eye(
+        #     covariance.shape[-1],
+        #     device=covariance.device,
+        #     dtype=covariance.dtype,
+        # ).unsqueeze(0)
+        # covariance = covariance + eye * self.config.covariance_regularization
+        # covariance_inv = torch.linalg.inv(covariance)
 
         diff = images - mean
-        latent = torch.einsum("bnchw,bchw->bn", var_basis, diff)
-        latent = torch.einsum("bmn,bn->bm", covariance_inv, latent)
-        projected_images = mean + torch.einsum("bm,bmchw->bchw", latent, var_basis)
+        latent = torch.einsum("bnchw,bchw->bn", basis, diff)
+        latent = latent * mask.float()
+        projected_images = mean + torch.einsum("bm,bmchw->bchw", latent, basis)
 
         return projected_images, {
-            "covariance": covariance,
             "latent": latent,
+            "var_basis": basis,
             "mean": mean,
-            "var_basis": var_basis,
+            "mean_detach": mean_detach,
+            "std": std,
+            "threshold": threshold,
+            "mask": mask,
         }
     
     def _enhance_images(
@@ -188,14 +217,22 @@ class AdversarialMetricModule(L.LightningModule):
         epsilon: torch.Tensor,
         aux: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        mean = aux["mean_detach"]
+        std = aux["std"]
+        mask = aux["mask"]
+        threshold = aux["threshold"]
+        latent = aux["latent"]
+        prc = std.clamp_min(threshold).reciprocal() * mask.float()
+        log_var = 2 * std.clamp_min(threshold).log() * mask.float()
+
         data_dim = self.config.image_channels * self.config.image_size * self.config.image_size
-        tangent_dim = self.config.rank
+        tangent_dim = mask.sum(dim=1)
         normal_dim = data_dim - tangent_dim
 
-        covariance = aux["covariance"]
-        latent = aux["latent"]
-        project_trace_term = latent.square().sum(dim=1).div(epsilon * self.projector_log_var.exp())
-        project_logdet_term = torch.logdet(covariance) + tangent_dim * (torch.log(epsilon) + self.projector_log_var)
+        mse_term = (images - mean).square().sum(dim=(1, 2, 3)).div(epsilon).mul(100)
+
+        project_trace_term = latent.mul(prc).square().sum(dim=1).div(epsilon * self.projector_log_var.exp())
+        project_logdet_term = log_var.sum(dim=1) + tangent_dim * (torch.log(epsilon) + self.projector_log_var)
         project_nll = 0.5 * project_trace_term + 0.5 * project_logdet_term
 
         enhanced_images = aux["enhanced_images"]
@@ -203,7 +240,7 @@ class AdversarialMetricModule(L.LightningModule):
         enhance_logdet_term = normal_dim * (torch.log(epsilon) + self.enhancer_log_var)
         enhance_nll = 0.5 * enhance_trace_term + 0.5 * enhance_logdet_term
 
-        nll = (project_nll + enhance_nll) / data_dim
+        nll = (mse_term + project_nll + enhance_nll) / data_dim
         return nll, {
             **aux,
             "project_nll": project_nll,
@@ -235,8 +272,11 @@ class AdversarialMetricModule(L.LightningModule):
             "enhanced_images": enhanced_images,
             "generated_basis": generated["normalized_basis"],
             "projector_basis": projected["var_basis"],
-            "covariance": projected["covariance"],
             "latent": projected["latent"],
+            "mean_detach": projected["mean_detach"],
+            "std": projected["std"],
+            "mask": projected["mask"],
+            "threshold": projected["threshold"],
         }
 
     def _run_adversarial_round(
@@ -271,6 +311,8 @@ class AdversarialMetricModule(L.LightningModule):
             "perturbation_rms": aux["perturbation"].square().mean().sqrt().detach(),
             "projector_log_var": self.projector_log_var.detach(),
             "enhancer_log_var": self.enhancer_log_var.detach(),
+            "tangent_dim": aux["mask"].float().sum(dim=1).mean().detach(),
+            "latent_var": aux["std"].square().sum(dim=1).mean().detach(),
         }
         return nll.mean(), metrics
 
@@ -700,7 +742,9 @@ class AdversarialMetricModule(L.LightningModule):
 
     def configure_optimizers(self):
         denoiser_optimizer = torch.optim.AdamW(
-            list(self.projector.parameters()) + list(self.enhancer.parameters()) + [self.projector_log_var, self.enhancer_log_var],
+              list(self.projector.parameters()) \
+            + list(self.enhancer.parameters()) \
+            + [self.projector_log_var, self.enhancer_log_var],
             lr=self.config.denoiser_learning_rate,
             weight_decay=self.config.denoiser_weight_decay,
         )

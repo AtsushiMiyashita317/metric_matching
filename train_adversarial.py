@@ -29,12 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-epochs", type=int, default=20)
-    parser.add_argument("--denoiser-learning-rate", type=float, default=2e-3)
-    parser.add_argument("--generator-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--denoiser-learning-rate", type=float, default=2e-4)
+    parser.add_argument("--generator-learning-rate", type=float, default=2e-4)
     parser.add_argument("--denoiser-lr-alpha", type=float, default=0.666)
     parser.add_argument("--generator-lr-alpha", type=float, default=1.0)
     parser.add_argument("--denoiser-warmup-steps", type=int, default=0)
-    parser.add_argument("--generator-warmup-steps", type=int, default=5000)
+    parser.add_argument("--generator-warmup-steps", type=int, default=0)
     parser.add_argument("--denoiser-lr-scale-steps", type=int, default=5000)
     parser.add_argument("--generator-lr-scale-steps", type=int, default=5000)
     parser.add_argument("--denoiser-weight-decay", type=float, default=0.0)
@@ -45,10 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attention-downsample-factor", type=int, default=4)
     parser.add_argument("--disable-output-bias", action="store_true")
     parser.add_argument("--output-bias-variance", type=float, default=1e-3)
-    parser.add_argument("--epsilon-min", type=float, default=1e-4)
-    parser.add_argument("--epsilon-max", type=float, default=1e-2)
+    parser.add_argument("--epsilon-min", type=float, default=1e-2)
+    parser.add_argument("--epsilon-max", type=float, default=1e+2)
     parser.add_argument("--generator-loss-weight", type=float, default=1.0)
     parser.add_argument("--covariance-regularization", type=float, default=1.0)
+    parser.add_argument("--std-atol", type=float, default=1e-4)
+    parser.add_argument("--std-rtol", type=float, default=1e-2)
     parser.add_argument("--scale-input", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
@@ -125,6 +127,8 @@ def main() -> None:
         epsilon_max=args.epsilon_max,
         generator_loss_weight=args.generator_loss_weight,
         covariance_regularization=args.covariance_regularization,
+        std_atol=args.std_atol,
+        std_rtol=args.std_rtol,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,
