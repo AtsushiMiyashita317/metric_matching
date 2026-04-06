@@ -238,17 +238,20 @@ class AtlasMetricModule(L.LightningModule):
 
         denoised_images = aux["denoised_images"]
         mse_term = (images - denoised_images).square().sum(dim=(1, 2, 3)).div(epsilon)
+        mse_term = mse_term / data_dim
 
         projection_trace_term = latent.mul(prc).square().sum(dim=1).div(epsilon * self.projection_log_var.exp())
         projection_logdet_term = log_var.sum(dim=1) + tangent_dim * (torch.log(epsilon) + self.projection_log_var)
         projection_nll = 0.5 * projection_trace_term + 0.5 * projection_logdet_term
+        projection_nll = projection_nll / data_dim
 
         enhanced_images = aux["enhanced_images"]
         refinement_trace_term = (enhanced_images - images).square().sum(dim=(1, 2, 3)).div(epsilon * self.refinement_log_var.exp())
         refinement_logdet_term = normal_dim * (torch.log(epsilon) + self.refinement_log_var)
         refinement_nll = 0.5 * refinement_trace_term + 0.5 * refinement_logdet_term
+        refinement_nll = refinement_nll / data_dim
 
-        nll = (mse_term + projection_nll + refinement_nll) / data_dim
+        nll = mse_term + projection_nll + refinement_nll
         return nll, {
             **aux,
             "mse_term": mse_term,
