@@ -134,7 +134,10 @@ class AtlasMetricModule(L.LightningModule):
         epsilon: torch.Tensor,
         local_coord: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        var_basis = self.projector(images, epsilon) * epsilon.sqrt()[:, None, None, None, None] * self.projection_log_var.div(2).exp()
+        _, c, h, w = images.shape
+        var_basis = self.projector(images, epsilon) / (c * h * w) ** 0.5
+        var_basis = var_basis * epsilon.sqrt()[:, None, None, None, None] * self.projection_log_var.div(2).exp()
+        
         if local_coord is None:
             local_coord = torch.randn(images.shape[0], var_basis.shape[1], device=images.device, dtype=images.dtype)
         projected_images = images + torch.einsum("bm,bmchw->bchw", local_coord, var_basis)
@@ -183,7 +186,8 @@ class AtlasMetricModule(L.LightningModule):
         denoised_images: torch.Tensor,
         epsilon: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        var_basis = self.projector(denoised_images, epsilon)
+        _, c, h, w = images.shape
+        var_basis = self.projector(denoised_images, epsilon) / (c * h * w) ** 0.5
 
         var_basis_flat = var_basis.flatten(start_dim=2)
         _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
