@@ -35,6 +35,7 @@ class AtlasMetricConfig:
     preview_samples: int = 4
     std_atol: float = 1e-2
     std_rtol: float = 1e-2
+    log_var_ema_decay: float = 0.9
 
 
 class AtlasMetricModule(L.LightningModule):
@@ -110,8 +111,9 @@ class AtlasMetricModule(L.LightningModule):
             epsilon_input_mode=config.epsilon_input_mode,
         )
 
-        self.projection_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
-        self.refinement_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)
+        self.register_buffer("projection_log_var", torch.tensor(0.0), persistent=True)
+        self.register_buffer("refinement_log_var", torch.tensor(0.0), persistent=True)
+        self.register_buffer("log_var_ema_initialized", torch.tensor(False, dtype=torch.bool), persistent=True)
 
         self.example_input_array = (
             torch.randn(2, config.image_channels, config.image_size, config.image_size),
@@ -228,11 +230,13 @@ class AtlasMetricModule(L.LightningModule):
         threshold = aux["threshold"]
         latent = aux["latent"]
         prc = std.clamp_min(threshold).reciprocal() * mask.float()
-        log_var = 2 * std.clamp_min(threshold).log() * mask.float()
+        basis_log_var = 2 * std.clamp_min(threshold).log() * mask.float()
 
         data_dim = self.config.image_channels * self.config.image_size * self.config.image_size
         tangent_dim = mask.sum(dim=1)
+        tangent_dim_float = tangent_dim.to(dtype=images.dtype)
         normal_dim = data_dim - tangent_dim
+        normal_dim_float = normal_dim.to(dtype=images.dtype)
 
         denoised_images = aux["denoised_images"]
         denoising_mse_term = (images - denoised_images).square().sum(dim=(1, 2, 3)).div(epsilon)
@@ -242,16 +246,55 @@ class AtlasMetricModule(L.LightningModule):
         projection_mse_term = (images - projected_images).square().sum(dim=(1, 2, 3)).div(epsilon)
         projection_mse_term = projection_mse_term / data_dim
 
-        projection_trace_term = latent.mul(prc).square().sum(dim=1).div(epsilon * self.projection_log_var.exp())
-        projection_logdet_term = log_var.sum(dim=1) + tangent_dim * (torch.log(epsilon) + self.projection_log_var)
+        projection_trace_coeff = latent.mul(prc).square().sum(dim=1).div(epsilon)
+        enhanced_images = aux["enhanced_images"]
+        refinement_trace_coeff = (enhanced_images - images).square().sum(dim=(1, 2, 3)).div(epsilon)
+
+        tiny = torch.finfo(images.dtype).tiny
+        projection_log_var = (
+            projection_trace_coeff.mean().clamp_min(tiny).log()
+            - tangent_dim_float.mean().clamp_min(tiny).log()
+        )
+        refinement_log_var = (
+            refinement_trace_coeff.mean().clamp_min(tiny).log()
+            - normal_dim_float.mean().clamp_min(tiny).log()
+        )
+
+        projection_log_var = torch.where(
+            tangent_dim_float.mean() > 0,
+            projection_log_var,
+            torch.zeros_like(projection_log_var),
+        )
+        refinement_log_var = torch.where(
+            normal_dim_float.mean() > 0,
+            refinement_log_var,
+            torch.zeros_like(refinement_log_var),
+        )
+
+        projection_trace_term = projection_trace_coeff / projection_log_var.exp()
+        projection_logdet_term = basis_log_var.sum(dim=1) + tangent_dim_float * (torch.log(epsilon) + projection_log_var)
         projection_nll = 0.5 * projection_trace_term + 0.5 * projection_logdet_term
         projection_nll = projection_nll / data_dim
 
-        enhanced_images = aux["enhanced_images"]
-        refinement_trace_term = (enhanced_images - images).square().sum(dim=(1, 2, 3)).div(epsilon * self.refinement_log_var.exp())
-        refinement_logdet_term = normal_dim * (torch.log(epsilon) + self.refinement_log_var)
+        refinement_trace_term = refinement_trace_coeff / refinement_log_var.exp()
+        refinement_logdet_term = normal_dim_float * (torch.log(epsilon) + refinement_log_var)
         refinement_nll = 0.5 * refinement_trace_term + 0.5 * refinement_logdet_term
         refinement_nll = refinement_nll / data_dim
+
+        with torch.no_grad():
+            if bool(self.log_var_ema_initialized):
+                ema_decay = torch.as_tensor(
+                    self.config.log_var_ema_decay,
+                    device=self.projection_log_var.device,
+                    dtype=self.projection_log_var.dtype,
+                )
+                one_minus_decay = 1.0 - ema_decay
+                self.projection_log_var.mul_(ema_decay).add_(projection_log_var.detach().to(self.projection_log_var.dtype) * one_minus_decay)
+                self.refinement_log_var.mul_(ema_decay).add_(refinement_log_var.detach().to(self.refinement_log_var.dtype) * one_minus_decay)
+            else:
+                self.projection_log_var.copy_(projection_log_var.detach())
+                self.refinement_log_var.copy_(refinement_log_var.detach())
+                self.log_var_ema_initialized.fill_(True)
 
         nll = denoising_mse_term + projection_mse_term + projection_nll + refinement_nll
         return nll, {
@@ -260,6 +303,8 @@ class AtlasMetricModule(L.LightningModule):
             "projection_mse_term": projection_mse_term,
             "projection_nll": projection_nll,
             "refinement_nll": refinement_nll,
+            "projection_log_var": projection_log_var,
+            "refinement_log_var": refinement_log_var,
         }
 
     def _compute_outputs(
@@ -314,8 +359,8 @@ class AtlasMetricModule(L.LightningModule):
             "refinement_nll": aux["refinement_nll"].mean().detach(),
             "white_noise_rms": aux["white_noise"].square().mean().sqrt().detach(),
             "perturbation_rms": aux["perturbation"].square().mean().sqrt().detach(),
-            "projection_log_var": self.projection_log_var.detach(),
-            "refinement_log_var": self.refinement_log_var.detach(),
+            "projection_log_var": aux["projection_log_var"].detach(),
+            "refinement_log_var": aux["refinement_log_var"].detach(),
             "tangent_dim": aux["mask"].float().sum(dim=1).mean().detach(),
             "latent_var": aux["std"].square().sum(dim=1).mean().detach(),
         }
@@ -844,7 +889,6 @@ class AtlasMetricModule(L.LightningModule):
             trainable_parameters.extend(list(self.denoiser.parameters()))
         trainable_parameters.extend(list(self.projector.parameters()))
         trainable_parameters.extend(list(self.enhancer.parameters()))
-        trainable_parameters.extend([self.projection_log_var, self.refinement_log_var])
         optimizer = torch.optim.AdamW(
             trainable_parameters,
             lr=self.config.learning_rate,
