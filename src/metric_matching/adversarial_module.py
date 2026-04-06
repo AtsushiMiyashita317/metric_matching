@@ -616,8 +616,10 @@ class AdversarialMetricModule(L.LightningModule):
     ) -> None:
         num_fields = min(8, singular_vectors.shape[1])
         rows: list[list[torch.Tensor]] = []
-        base_image = self._denormalize_image(clean_images[0]).clamp(0.0, 1.0).cpu()
-        rows.append([base_image.clone() for _ in range(epsilon.shape[0])])
+        rows.append([
+            self._denormalize_image(clean_images[epsilon_idx]).clamp(0.0, 1.0).cpu()
+            for epsilon_idx in range(epsilon.shape[0])
+        ])
 
         displayed_singular_values = []
         for field_idx in range(num_fields):
