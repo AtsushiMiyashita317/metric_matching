@@ -134,8 +134,7 @@ class AtlasMetricModule(L.LightningModule):
         epsilon: torch.Tensor,
         local_coord: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _, c, h, w = images.shape
-        var_basis = self.projector(images, epsilon) / (c * h * w) ** 0.5
+        var_basis = self.projector(images, epsilon)
         var_basis = var_basis * epsilon.sqrt()[:, None, None, None, None] * self.projection_log_var.div(2).exp()
         
         if local_coord is None:
@@ -187,7 +186,7 @@ class AtlasMetricModule(L.LightningModule):
         epsilon: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         _, c, h, w = images.shape
-        var_basis = self.projector(denoised_images, epsilon) / (c * h * w) ** 0.5
+        var_basis = self.projector(denoised_images, epsilon)
 
         var_basis_flat = var_basis.flatten(start_dim=2)
         _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
@@ -237,8 +236,12 @@ class AtlasMetricModule(L.LightningModule):
         normal_dim = data_dim - tangent_dim
 
         denoised_images = aux["denoised_images"]
-        mse_term = (images - denoised_images).square().sum(dim=(1, 2, 3)).div(epsilon)
-        mse_term = mse_term / data_dim
+        denoising_mse_term = (images - denoised_images).square().sum(dim=(1, 2, 3)).div(epsilon)
+        denoising_mse_term = denoising_mse_term / data_dim
+
+        projected_images = aux["projected_images"]
+        projection_mse_term = (images - projected_images).square().sum(dim=(1, 2, 3)).div(epsilon)
+        projection_mse_term = projection_mse_term / data_dim
 
         projection_trace_term = latent.mul(prc).square().sum(dim=1).div(epsilon * self.projection_log_var.exp())
         projection_logdet_term = log_var.sum(dim=1) + tangent_dim * (torch.log(epsilon) + self.projection_log_var)
@@ -251,10 +254,11 @@ class AtlasMetricModule(L.LightningModule):
         refinement_nll = 0.5 * refinement_trace_term + 0.5 * refinement_logdet_term
         refinement_nll = refinement_nll / data_dim
 
-        nll = mse_term + projection_nll + refinement_nll
+        nll = denoising_mse_term + projection_mse_term + projection_nll + refinement_nll
         return nll, {
             **aux,
-            "mse_term": mse_term,
+            "denoising_mse_term": denoising_mse_term,
+            "projection_mse_term": projection_mse_term,
             "projection_nll": projection_nll,
             "refinement_nll": refinement_nll,
         }
@@ -305,7 +309,8 @@ class AtlasMetricModule(L.LightningModule):
 
         metrics = {
             "nll": nll.mean().detach(),
-            "mse_term": aux["mse_term"].mean().detach(),
+            "denoising_mse_term": aux["denoising_mse_term"].mean().detach(),
+            "projection_mse_term": aux["projection_mse_term"].mean().detach(),
             "projection_nll": aux["projection_nll"].mean().detach(),
             "refinement_nll": aux["refinement_nll"].mean().detach(),
             "white_noise_rms": aux["white_noise"].square().mean().sqrt().detach(),
