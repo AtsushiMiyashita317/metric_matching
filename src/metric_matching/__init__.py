@@ -2,6 +2,7 @@
 
 __all__ = [
     "adversarial_module",
+    "atlas_module",
     "data",
     "lightning_module",
     "models",
