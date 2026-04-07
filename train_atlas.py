@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon-max", type=float, default=1e+2)
     parser.add_argument("--std-atol", type=float, default=1e-4)
     parser.add_argument("--std-rtol", type=float, default=1e-2)
+    parser.add_argument("--projection-mse-term-weight", type=float, default=1.0)
     parser.add_argument("--scale-input", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
@@ -118,6 +119,7 @@ def main() -> None:
         epsilon_max=args.epsilon_max,
         std_atol=args.std_atol,
         std_rtol=args.std_rtol,
+        projection_mse_term_weight=args.projection_mse_term_weight,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,

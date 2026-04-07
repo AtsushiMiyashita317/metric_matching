@@ -36,6 +36,7 @@ class AtlasMetricConfig:
     std_atol: float = 1e-2
     std_rtol: float = 1e-2
     log_var_ema_decay: float = 0.9
+    projection_mse_term_weight: float = 1.0
 
 
 class AtlasMetricModule(L.LightningModule):
@@ -245,6 +246,7 @@ class AtlasMetricModule(L.LightningModule):
         projected_images = aux["projected_images"]
         projection_mse_term = (images - projected_images).square().sum(dim=(1, 2, 3)).div(epsilon)
         projection_mse_term = projection_mse_term / data_dim
+        weighted_projection_mse_term = projection_mse_term * self.config.projection_mse_term_weight
 
         projection_trace_coeff = latent.mul(prc).square().sum(dim=1).div(epsilon)
         enhanced_images = aux["enhanced_images"]
@@ -296,11 +298,12 @@ class AtlasMetricModule(L.LightningModule):
                 self.refinement_log_var.copy_(refinement_log_var.detach())
                 self.log_var_ema_initialized.fill_(True)
 
-        nll = denoising_mse_term + projection_mse_term + projection_nll + refinement_nll
+        nll = denoising_mse_term + weighted_projection_mse_term + projection_nll + refinement_nll
         return nll, {
             **aux,
             "denoising_mse_term": denoising_mse_term,
             "projection_mse_term": projection_mse_term,
+            "weighted_projection_mse_term": weighted_projection_mse_term,
             "projection_nll": projection_nll,
             "refinement_nll": refinement_nll,
             "projection_log_var": projection_log_var,
