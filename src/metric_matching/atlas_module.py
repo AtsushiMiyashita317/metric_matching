@@ -368,7 +368,7 @@ class AtlasMetricModule(L.LightningModule):
             "projection_log_var": aux["projection_log_var"].detach(),
             "refinement_log_var": aux["refinement_log_var"].detach(),
             "tangent_dim": aux["mask"].float().sum(dim=1).mean().detach(),
-            "latent_var": aux["std"].square().mean().mul(aux["projection_log_var"].exp() / data_dim).detach(),
+            "latent_var": aux["std"].square().sum(dim=1).mean().mul(aux["projection_log_var"].exp() / data_dim).detach(),
         }
         return nll.mean(), metrics
 
