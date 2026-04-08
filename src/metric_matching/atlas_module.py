@@ -37,7 +37,7 @@ class AtlasMetricConfig:
     std_rtol: float = 1e-2
     log_var_ema_decay: float = 0.9
     projection_mse_term_weight: float = 1.0
-    gate_temperature: float = 4.0
+    gate_temperature: float = 16.0
 
 
 class AtlasMetricModule(L.LightningModule):
@@ -194,14 +194,15 @@ class AtlasMetricModule(L.LightningModule):
         var_basis_flat = var_basis.flatten(start_dim=2)
         _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
         threshold = torch.maximum(self.config.std_atol * torch.ones_like(std[:,0]), self.config.std_rtol * std[:,0])
+        gumbel_scale = torch.rand_like(threshold).log().neg()
+        threshold = threshold / gumbel_scale
         threshold = threshold.unsqueeze(1)
         gate = gated_ones(std, threshold.detach(), self.config.gate_temperature)
         basis = basis_flat.view_as(var_basis)
 
         diff = images - denoised_images
         latent = torch.einsum("bnchw,bchw->bn", basis, diff)
-        latent = latent * gate
-        projected_images = denoised_images + torch.einsum("bm,bmchw->bchw", latent, basis)
+        projected_images = denoised_images + torch.einsum("bm,bmchw->bchw", latent * gate, basis)
 
         return projected_images, {
             "latent": latent,
