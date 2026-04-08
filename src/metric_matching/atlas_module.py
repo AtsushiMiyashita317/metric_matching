@@ -194,8 +194,9 @@ class AtlasMetricModule(L.LightningModule):
         var_basis_flat = var_basis.flatten(start_dim=2)
         _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
         threshold = torch.maximum(self.config.std_atol * torch.ones_like(std[:,0]), self.config.std_rtol * std[:,0])
-        gumbel_scale = torch.rand_like(threshold).log().neg()
-        threshold = threshold / gumbel_scale
+        gumbel_scale_num = torch.rand_like(threshold).log().neg()
+        gumbel_scale_den = torch.rand_like(threshold).log().neg()
+        threshold = threshold * gumbel_scale_num / gumbel_scale_den
         threshold = threshold.unsqueeze(1)
         gate = gated_ones(std, threshold.detach(), self.config.gate_temperature)
         basis = basis_flat.view_as(var_basis)
