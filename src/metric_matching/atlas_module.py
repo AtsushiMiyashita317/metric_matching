@@ -12,7 +12,7 @@ import torch
 from metric_matching.data import restore_image_range
 from metric_matching.models import MetricBasisNetwork, ScoreNetwork
 from metric_matching.score_module import load_score_network_checkpoint, read_score_checkpoint_config
-
+from metric_matching.functional import gated_log, gated_reciprocal, gated_ones
 
 @dataclass
 class AtlasMetricConfig:
@@ -37,6 +37,7 @@ class AtlasMetricConfig:
     std_rtol: float = 1e-2
     log_var_ema_decay: float = 0.9
     projection_mse_term_weight: float = 1.0
+    gate_temperature: float = 4.0
 
 
 class AtlasMetricModule(L.LightningModule):
@@ -194,12 +195,12 @@ class AtlasMetricModule(L.LightningModule):
         _, std, basis_flat = torch.linalg.svd(var_basis_flat, full_matrices=False)
         threshold = torch.maximum(self.config.std_atol * torch.ones_like(std[:,0]), self.config.std_rtol * std[:,0])
         threshold = threshold.unsqueeze(1)
-        mask = std > threshold
+        gate = gated_ones(std, threshold.detach(), self.config.gate_temperature)
         basis = basis_flat.view_as(var_basis)
 
         diff = images - denoised_images
         latent = torch.einsum("bnchw,bchw->bn", basis, diff)
-        latent = latent * mask.float()
+        latent = latent * gate
         projected_images = denoised_images + torch.einsum("bm,bmchw->bchw", latent, basis)
 
         return projected_images, {
@@ -207,7 +208,7 @@ class AtlasMetricModule(L.LightningModule):
             "var_basis": var_basis,
             "std": std,
             "threshold": threshold,
-            "mask": mask,
+            "gate": gate,
         }
     
     def _enhance_images(
@@ -227,14 +228,14 @@ class AtlasMetricModule(L.LightningModule):
         aux: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         std = aux["std"]
-        mask = aux["mask"]
+        gate = aux["gate"]
         threshold = aux["threshold"]
         latent = aux["latent"]
-        prc = std.clamp_min(threshold).reciprocal() * mask.float()
-        basis_log_var = 2 * std.clamp_min(threshold).log() * mask.float()
+        prc = gated_reciprocal(std, threshold.detach(), self.config.gate_temperature)
+        basis_log_var = 2 * gated_log(std, threshold.detach(), self.config.gate_temperature)
 
         data_dim = self.config.image_channels * self.config.image_size * self.config.image_size
-        tangent_dim = mask.sum(dim=1)
+        tangent_dim = gate.sum(dim=1)
         tangent_dim_float = tangent_dim.to(dtype=images.dtype)
         normal_dim = data_dim - tangent_dim
         normal_dim_float = normal_dim.to(dtype=images.dtype)
@@ -337,7 +338,7 @@ class AtlasMetricModule(L.LightningModule):
             "basis": projected["var_basis"],
             "latent": projected["latent"],
             "std": projected["std"],
-            "mask": projected["mask"],
+            "gate": projected["gate"],
             "threshold": projected["threshold"],
         }
 
@@ -367,7 +368,7 @@ class AtlasMetricModule(L.LightningModule):
             "perturbation_rms": aux["perturbation"].square().mean().sqrt().detach(),
             "projection_log_var": aux["projection_log_var"].detach(),
             "refinement_log_var": aux["refinement_log_var"].detach(),
-            "tangent_dim": aux["mask"].float().sum(dim=1).mean().detach(),
+            "tangent_dim": aux["gate"].sum(dim=1).mean().detach(),
             "latent_var": aux["std"].square().sum(dim=1).mean().mul(aux["projection_log_var"].exp() / data_dim).detach(),
         }
         return nll.mean(), metrics
