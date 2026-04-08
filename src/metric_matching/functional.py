@@ -67,11 +67,11 @@ class gated_log_impl(torch.autograd.Function):
 
 
 def gated_log(x: torch.Tensor, threshold: torch.Tensor, temperature: float) -> torch.Tensor:
-    threshold = threshold.expand_as(x)
+    x, threshold = torch.broadcast_tensors(x, threshold)
     return gated_log_impl.apply(x, threshold, temperature)
 
 def gated_reciprocal(x: torch.Tensor, threshold: torch.Tensor, temperature: float) -> torch.Tensor:
-    threshold = threshold.expand_as(x)
+    x, threshold = torch.broadcast_tensors(x, threshold)
     y = torch.empty_like(x)
     left = x <= threshold
     right = ~left
@@ -94,7 +94,7 @@ def gated_reciprocal(x: torch.Tensor, threshold: torch.Tensor, temperature: floa
     return y
 
 def gated_ones(x: torch.Tensor, threshold: torch.Tensor, temperature: float) -> torch.Tensor:
-    threshold = threshold.expand_as(x)
+    x, threshold = torch.broadcast_tensors(x, threshold)
     y = torch.empty_like(x)
     left = x <= threshold
     right = ~left
