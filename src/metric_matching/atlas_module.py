@@ -287,7 +287,7 @@ class AtlasMetricModule(L.LightningModule):
         refinement_nll = 0.5 * refinement_trace_term + 0.5 * refinement_logdet_term
         refinement_nll = refinement_nll / data_dim
 
-        nuclear_norm = std.sum(dim=1) * projection_log_var.div(2).exp()
+        nuclear_norm = gate.sum(dim=1)
         weighted_nuclear_norm = nuclear_norm * self.config.nuclear_norm_weight
 
 
