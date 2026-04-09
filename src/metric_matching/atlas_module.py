@@ -252,9 +252,6 @@ class AtlasMetricModule(L.LightningModule):
         projection_mse_term = projection_mse_term / data_dim
         weighted_projection_mse_term = projection_mse_term * self.config.projection_mse_term_weight
 
-        nuclear_norm = std.sum(dim=1)
-        weighted_nuclear_norm = nuclear_norm * self.config.nuclear_norm_weight
-
         projection_trace_coeff = latent.mul(prc).square().sum(dim=1).div(epsilon)
         enhanced_images = aux["enhanced_images"]
         refinement_trace_coeff = (enhanced_images - images).square().sum(dim=(1, 2, 3)).div(epsilon)
@@ -289,6 +286,10 @@ class AtlasMetricModule(L.LightningModule):
         refinement_logdet_term = normal_dim_float * (torch.log(epsilon) + refinement_log_var)
         refinement_nll = 0.5 * refinement_trace_term + 0.5 * refinement_logdet_term
         refinement_nll = refinement_nll / data_dim
+
+        nuclear_norm = std.sum(dim=1) * projection_log_var.div(2).exp()
+        weighted_nuclear_norm = nuclear_norm * self.config.nuclear_norm_weight
+
 
         with torch.no_grad():
             if bool(self.log_var_ema_initialized):
