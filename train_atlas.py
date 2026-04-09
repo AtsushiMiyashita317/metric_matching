@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-rtol", type=float, default=1e-2)
     parser.add_argument("--gate-temperature", type=float, default=16.0)
     parser.add_argument("--projection-mse-term-weight", type=float, default=1.0)
+    parser.add_argument("--nuclear-norm-weight", type=float, default=0.0)
     parser.add_argument("--scale-input", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
@@ -122,6 +123,7 @@ def main() -> None:
         std_rtol=args.std_rtol,
         gate_temperature=args.gate_temperature,
         projection_mse_term_weight=args.projection_mse_term_weight,
+        nuclear_norm_weight=args.nuclear_norm_weight,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
         preview_samples=args.preview_samples,
