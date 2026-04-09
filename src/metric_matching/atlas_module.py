@@ -370,6 +370,7 @@ class AtlasMetricModule(L.LightningModule):
             "projection_mse_term": aux["projection_mse_term"].mean().detach(),
             "projection_nll": aux["projection_nll"].mean().detach(),
             "refinement_nll": aux["refinement_nll"].mean().detach(),
+            "nuclear_norm": aux["nuclear_norm"].mean().detach(),
             "white_noise_rms": aux["white_noise"].square().mean().sqrt().detach(),
             "perturbation_rms": aux["perturbation"].square().mean().sqrt().detach(),
             "projection_log_var": aux["projection_log_var"].detach(),
