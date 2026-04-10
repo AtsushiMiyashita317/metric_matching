@@ -31,6 +31,7 @@ class AdversarialMetricConfig:
     covariance_regularization: float = 1e-6
     scale_input: bool = False
     epsilon_input_mode: str = "log_clamp"
+    condition_on_epsilon: bool = True
     preview_samples: int = 4
     std_atol: float = 1e-2
     std_rtol: float = 1e-2
@@ -74,6 +75,7 @@ class AdversarialMetricModule(L.LightningModule):
             output_bias_variance=config.output_bias_variance,
             scale_input=config.scale_input,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.condition_on_epsilon,
         )
 
         self.enhancer = ScoreNetwork(
@@ -87,6 +89,7 @@ class AdversarialMetricModule(L.LightningModule):
             output_bias_variance=config.output_bias_variance,
             scale_input=config.scale_input,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.condition_on_epsilon,
         )
 
         self.noise_generator = MetricBasisNetwork(
@@ -101,6 +104,7 @@ class AdversarialMetricModule(L.LightningModule):
             output_bias_variance=config.output_bias_variance,
             scale_input=config.scale_input,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.condition_on_epsilon,
         )
 
         self.projector_log_var = torch.nn.Parameter(torch.tensor(0.0), requires_grad=True)

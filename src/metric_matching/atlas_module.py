@@ -32,6 +32,8 @@ class AtlasMetricConfig:
     epsilon_max: float = 5e-2
     scale_input: bool = False
     epsilon_input_mode: str = "log_clamp"
+    condition_on_epsilon: bool = True
+    projector_enhancer_condition_on_epsilon: bool = True
     preview_samples: int = 4
     std_atol: float = 1e-2
     std_rtol: float = 1e-2
@@ -58,13 +60,16 @@ class AtlasMetricModule(L.LightningModule):
         self.loaded_denoiser_checkpoint_path: str | None = None
         self.loaded_denoiser_scale_input: bool | None = None
         self.loaded_denoiser_epsilon_input_mode: str | None = None
+        self.loaded_denoiser_condition_on_epsilon: bool | None = None
 
         denoiser_scale_input = config.scale_input
         denoiser_epsilon_input_mode = config.epsilon_input_mode
+        denoiser_condition_on_epsilon = config.condition_on_epsilon
         if self.uses_frozen_denoiser:
             checkpoint_config = read_score_checkpoint_config(Path(self.config.pretrained_denoiser_checkpoint))
             denoiser_scale_input = bool(checkpoint_config["scale_input"])
             denoiser_epsilon_input_mode = str(checkpoint_config["epsilon_input_mode"])
+            denoiser_condition_on_epsilon = bool(checkpoint_config["condition_on_epsilon"])
 
         self.denoiser = ScoreNetwork(
             image_size=config.image_size,
@@ -77,6 +82,7 @@ class AtlasMetricModule(L.LightningModule):
             output_bias_variance=config.output_bias_variance,
             scale_input=denoiser_scale_input,
             epsilon_input_mode=denoiser_epsilon_input_mode,
+            condition_on_epsilon=denoiser_condition_on_epsilon,
         )
         if self.uses_frozen_denoiser:
             checkpoint_metadata = load_score_network_checkpoint(
@@ -86,6 +92,7 @@ class AtlasMetricModule(L.LightningModule):
             self.loaded_denoiser_checkpoint_path = str(checkpoint_metadata["checkpoint_path"])
             self.loaded_denoiser_scale_input = bool(checkpoint_metadata["scale_input"])
             self.loaded_denoiser_epsilon_input_mode = str(checkpoint_metadata["epsilon_input_mode"])
+            self.loaded_denoiser_condition_on_epsilon = bool(checkpoint_metadata["condition_on_epsilon"])
             self.denoiser.requires_grad_(False)
             self.denoiser.eval()
 
@@ -100,6 +107,7 @@ class AtlasMetricModule(L.LightningModule):
             use_output_bias=config.use_output_bias,
             output_bias_variance=config.output_bias_variance,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.projector_enhancer_condition_on_epsilon,
         )
 
         self.enhancer = ScoreNetwork(
@@ -112,6 +120,7 @@ class AtlasMetricModule(L.LightningModule):
             use_output_bias=config.use_output_bias,
             output_bias_variance=config.output_bias_variance,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.projector_enhancer_condition_on_epsilon,
         )
 
         self.register_buffer("projection_log_var", torch.tensor(0.0), persistent=True)

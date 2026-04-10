@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projection-mse-term-weight", type=float, default=1.0)
     parser.add_argument("--nuclear-norm-weight", type=float, default=0.0)
     parser.add_argument("--scale-input", action="store_true")
+    parser.add_argument("--disable-epsilon-conditioning", action="store_true")
+    parser.add_argument("--disable-projector-enhancer-epsilon-conditioning", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
         type=str,
@@ -126,6 +128,10 @@ def main() -> None:
         nuclear_norm_weight=args.nuclear_norm_weight,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
+        condition_on_epsilon=not args.disable_epsilon_conditioning,
+        projector_enhancer_condition_on_epsilon=(
+            not args.disable_projector_enhancer_epsilon_conditioning
+        ),
         preview_samples=args.preview_samples,
     )
     model = AtlasMetricModule(config)

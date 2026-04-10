@@ -77,6 +77,7 @@ def load_score_network_checkpoint(
         "checkpoint_path": str(resolved_path),
         "scale_input": checkpoint_config["scale_input"],
         "epsilon_input_mode": checkpoint_config["epsilon_input_mode"],
+        "condition_on_epsilon": checkpoint_config["condition_on_epsilon"],
         "checkpoint_keys": tuple(sorted(raw_state_dict.keys())),
     }
 
@@ -97,6 +98,7 @@ class ScorePretrainingConfig:
     score_target: Literal["noise", "mean"] = "noise"
     scale_input: bool = False
     epsilon_input_mode: Literal["log_clamp", "log_one_plus", "identity"] = "log_clamp"
+    condition_on_epsilon: bool = True
     preview_samples: int = 4
     preview_num_epsilons: int = 5
 
@@ -119,6 +121,7 @@ def read_score_checkpoint_config(checkpoint_path: str | Path) -> dict[str, objec
         "epsilon_input_mode": str(
             hyper_parameters.get("epsilon_input_mode", "log_clamp")
         ),
+        "condition_on_epsilon": bool(hyper_parameters.get("condition_on_epsilon", True)),
     }
 
 
@@ -142,6 +145,7 @@ class ScorePretrainingModule(L.LightningModule):
             output_bias_variance=config.output_bias_variance,
             scale_input=config.scale_input,
             epsilon_input_mode=config.epsilon_input_mode,
+            condition_on_epsilon=config.condition_on_epsilon,
         )
         self.example_input_array = (
             torch.randn(2, config.image_channels, config.image_size, config.image_size),

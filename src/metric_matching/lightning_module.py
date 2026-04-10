@@ -44,6 +44,7 @@ class MetricMatchingConfig:
     pretrained_metric_input: Literal["noisy", "denoised", "[noisy, denoised]"] = "noisy"
     scale_input: bool = False
     epsilon_input_mode: Literal["log_clamp", "log_one_plus", "identity"] = "log_clamp"
+    condition_on_epsilon: bool = True
     preview_fields: int = 8
     preview_samples: int = 4
     preview_steps: int = 7
@@ -87,6 +88,7 @@ class MetricMatchingModule(L.LightningModule):
         self.loaded_score_checkpoint_path: str | None = None
         self.loaded_score_scale_input: bool | None = None
         self.loaded_score_epsilon_input_mode: str | None = None
+        self.loaded_score_condition_on_epsilon: bool | None = None
         self.network: MetricFactorNetwork | None = None
         self.metric_network: MetricBasisNetwork | None = None
         self.score_network: ScoreNetwork | None = None
@@ -102,6 +104,7 @@ class MetricMatchingModule(L.LightningModule):
                 output_bias_variance=config.output_bias_variance,
                 scale_input=config.scale_input,
                 epsilon_input_mode=config.epsilon_input_mode,
+                condition_on_epsilon=config.condition_on_epsilon,
             )
         else:
             score_checkpoint_config = read_score_checkpoint_config(
@@ -122,6 +125,7 @@ class MetricMatchingModule(L.LightningModule):
                 output_bias_variance=config.output_bias_variance,
                 scale_input=config.scale_input,
                 epsilon_input_mode=config.epsilon_input_mode,
+                condition_on_epsilon=config.condition_on_epsilon,
             )
             self.score_network = ScoreNetwork(
                 image_size=config.image_size,
@@ -133,6 +137,7 @@ class MetricMatchingModule(L.LightningModule):
                 output_bias_variance=config.output_bias_variance,
                 scale_input=bool(score_checkpoint_config["scale_input"]),
                 epsilon_input_mode=str(score_checkpoint_config["epsilon_input_mode"]),
+                condition_on_epsilon=bool(score_checkpoint_config["condition_on_epsilon"]),
             )
             checkpoint_metadata = load_score_network_checkpoint(
                 self.score_network,
@@ -141,6 +146,7 @@ class MetricMatchingModule(L.LightningModule):
             self.loaded_score_checkpoint_path = str(checkpoint_metadata["checkpoint_path"])
             self.loaded_score_scale_input = bool(checkpoint_metadata["scale_input"])
             self.loaded_score_epsilon_input_mode = str(checkpoint_metadata["epsilon_input_mode"])
+            self.loaded_score_condition_on_epsilon = bool(checkpoint_metadata["condition_on_epsilon"])
             self.score_network.requires_grad_(False)
             self.score_network.eval()
         self.example_input_array = (

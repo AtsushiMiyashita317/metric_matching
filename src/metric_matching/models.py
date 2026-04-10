@@ -206,17 +206,20 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
-        if self.use_scale_shift_norm:
-            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = out_norm(h) * (1 + scale) + shift
-            h = out_rest(h)
-        else:
-            h = h + emb_out
+        if emb is None:
             h = self.out_layers(h)
+        else:
+            emb_out = self.emb_layers(emb).type(h.dtype)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
+            if self.use_scale_shift_norm:
+                out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+                scale, shift = th.chunk(emb_out, 2, dim=1)
+                h = out_norm(h) * (1 + scale) + shift
+                h = out_rest(h)
+            else:
+                h = h + emb_out
+                h = self.out_layers(h)
         return self.skip_connection(x) + h
 
 
@@ -508,9 +511,13 @@ class UNetModel(nn.Module):
     def forward(self, x, timesteps, y=None):
         assert (y is not None) == (self.num_classes is not None)
         hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        emb = None if timesteps is None else self.time_embed(
+            timestep_embedding(timesteps, self.model_channels)
+        )
 
         if self.num_classes is not None:
+            if emb is None:
+                raise ValueError("Class-conditional UNet requires timestep conditioning.")
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
@@ -609,6 +616,7 @@ class ScoreNetwork(nn.Module):
         output_bias_variance: float = 1e-3,
         scale_input: bool = False,
         epsilon_input_mode: str = "log_clamp",
+        condition_on_epsilon: bool = True,
     ) -> None:
         super().__init__()
         del cond_dim
@@ -618,6 +626,7 @@ class ScoreNetwork(nn.Module):
         self.data_channels = data_channels
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
+        self.condition_on_epsilon = condition_on_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -636,9 +645,13 @@ class ScoreNetwork(nn.Module):
             epsilon,
             scale_input=self.scale_input,
         )
-        transformed_epsilon = transform_epsilon_for_unet(
-            epsilon,
-            epsilon_input_mode=self.epsilon_input_mode,
+        transformed_epsilon = (
+            transform_epsilon_for_unet(
+                epsilon,
+                epsilon_input_mode=self.epsilon_input_mode,
+            )
+            if self.condition_on_epsilon
+            else None
         )
         return self.unet(scaled_image, transformed_epsilon)
 
@@ -659,6 +672,7 @@ class MetricBasisNetwork(nn.Module):
         output_bias_variance: float = 1e-3,
         scale_input: bool = False,
         epsilon_input_mode: str = "log_clamp",
+        condition_on_epsilon: bool = True,
     ) -> None:
         super().__init__()
         del cond_dim
@@ -669,6 +683,7 @@ class MetricBasisNetwork(nn.Module):
         self.rank = rank
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
+        self.condition_on_epsilon = condition_on_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -687,9 +702,13 @@ class MetricBasisNetwork(nn.Module):
             epsilon,
             scale_input=self.scale_input,
         )
-        transformed_epsilon = transform_epsilon_for_unet(
-            epsilon,
-            epsilon_input_mode=self.epsilon_input_mode,
+        transformed_epsilon = (
+            transform_epsilon_for_unet(
+                epsilon,
+                epsilon_input_mode=self.epsilon_input_mode,
+            )
+            if self.condition_on_epsilon
+            else None
         )
         out = self.unet(scaled_image, transformed_epsilon)
         batch_size, _, height, width = out.shape
@@ -712,6 +731,7 @@ class MetricFactorNetwork(nn.Module):
         output_bias_variance: float = 1e-3,
         scale_input: bool = False,
         epsilon_input_mode: str = "log_clamp",
+        condition_on_epsilon: bool = True,
     ) -> None:
         super().__init__()
         del cond_dim
@@ -722,6 +742,7 @@ class MetricFactorNetwork(nn.Module):
         self.rank = rank
         self.scale_input = scale_input
         self.epsilon_input_mode = epsilon_input_mode
+        self.condition_on_epsilon = condition_on_epsilon
         self.unet = build_metric_matching_unet(
             image_size=image_size,
             in_channels=in_channels,
@@ -740,9 +761,13 @@ class MetricFactorNetwork(nn.Module):
             epsilon,
             scale_input=self.scale_input,
         )
-        transformed_epsilon = transform_epsilon_for_unet(
-            epsilon,
-            epsilon_input_mode=self.epsilon_input_mode,
+        transformed_epsilon = (
+            transform_epsilon_for_unet(
+                epsilon,
+                epsilon_input_mode=self.epsilon_input_mode,
+            )
+            if self.condition_on_epsilon
+            else None
         )
         out = self.unet(scaled_image, transformed_epsilon)
         batch_size, _, height, width = out.shape

@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-atol", type=float, default=1e-4)
     parser.add_argument("--std-rtol", type=float, default=1e-2)
     parser.add_argument("--scale-input", action="store_true")
+    parser.add_argument("--disable-epsilon-conditioning", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
         type=str,
@@ -131,6 +132,7 @@ def main() -> None:
         std_rtol=args.std_rtol,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
+        condition_on_epsilon=not args.disable_epsilon_conditioning,
         preview_samples=args.preview_samples,
     )
     model = AdversarialMetricModule(config)

@@ -65,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["noisy", "denoised", "[noisy, denoised]"],
     )
     parser.add_argument("--scale-input", action="store_true")
+    parser.add_argument("--disable-epsilon-conditioning", action="store_true")
     parser.add_argument(
         "--eps-input-mode",
         type=str,
@@ -146,6 +147,7 @@ def main() -> None:
         pretrained_metric_input=args.pretrained_metric_input,
         scale_input=args.scale_input,
         epsilon_input_mode=args.eps_input_mode,
+        condition_on_epsilon=not args.disable_epsilon_conditioning,
         preview_fields=args.preview_fields,
         preview_samples=args.preview_samples,
         preview_steps=args.preview_steps,
