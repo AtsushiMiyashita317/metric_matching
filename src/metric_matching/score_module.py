@@ -7,6 +7,7 @@ from typing import Literal
 import lightning as L
 import numpy as np
 import torch
+from torch.utils.data._utils.collate import default_collate
 
 from metric_matching.data import restore_image_range
 from metric_matching.models import ScoreNetwork
@@ -276,7 +277,9 @@ class ScorePretrainingModule(L.LightningModule):
             return
 
         num_samples = min(self.config.preview_samples, len(val_dataset))
-        clean_images = torch.stack([val_dataset[idx]["image"] for idx in range(num_samples)], dim=0).to(self.device)
+        clean_images = self._collect_preview_images(num_samples)
+        if clean_images is None:
+            return
         epsilon = self._preview_epsilon_values(1, clean_images.device, clean_images.dtype).expand(num_samples)
         noise = torch.randn_like(clean_images)
         noisy_images = clean_images + epsilon.sqrt()[:, None, None, None] * noise
@@ -339,7 +342,10 @@ class ScorePretrainingModule(L.LightningModule):
         if val_dataset is None or len(val_dataset) == 0:
             return
 
-        clean_image = val_dataset[0]["image"].unsqueeze(0).to(self.device)
+        clean_images = self._collect_preview_images(1)
+        if clean_images is None:
+            return
+        clean_image = clean_images[:1]
         epsilon = self._preview_epsilon_values(
             self.config.preview_num_epsilons,
             clean_image.device,
@@ -397,6 +403,26 @@ class ScorePretrainingModule(L.LightningModule):
                 },
                 step=self.global_step,
             )
+
+    def _collect_preview_images(self, num_samples: int) -> torch.Tensor | None:
+        if self.trainer is None:
+            return None
+        datamodule = getattr(self.trainer, "datamodule", None)
+        val_dataset = getattr(datamodule, "val_dataset", None)
+        if val_dataset is None or num_samples <= 0:
+            return None
+
+        first_sample = val_dataset[0]
+        if isinstance(first_sample, dict) and "image" in first_sample:
+            return torch.stack([val_dataset[idx]["image"] for idx in range(num_samples)], dim=0).to(self.device)
+
+        samples = [val_dataset[idx] for idx in range(num_samples)]
+        batch = default_collate(samples)
+        if hasattr(datamodule, "on_after_batch_transfer"):
+            batch = datamodule.on_after_batch_transfer(batch, dataloader_idx=0)
+        if not isinstance(batch, dict) or "image" not in batch:
+            return None
+        return batch["image"].to(self.device)
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")

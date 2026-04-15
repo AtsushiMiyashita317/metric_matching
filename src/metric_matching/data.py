@@ -506,7 +506,7 @@ class Shapes3DDataModule(L.LightningDataModule):
         )
 
 
-class Differentiable3DshapesDataset(Dataset):
+class Shapes3DFactorDataset(Dataset):
     def __init__(
         self,
         length: int,
@@ -519,7 +519,6 @@ class Differentiable3DshapesDataset(Dataset):
     ) -> None:
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
-        self.renderer = Differentiable3Dshapes()
         self.length = int(length)
         self.normalize = normalize
         self.stats = stats
@@ -567,41 +566,8 @@ class Differentiable3DshapesDataset(Dataset):
 
         global_index = int(self.indices[index])
         factors = self._sample_factors(global_index)
-        shape = int(factors[0].item())
-        gt_tangent = None
-        if self.return_grad:
-            grads, image = self.renderer.forward(
-                shape=shape,
-                size=factors[1],
-                orientation=factors[2],
-                floor_hue=factors[3],
-                wall_hue=factors[4],
-                object_hue=factors[5],
-                return_grad=True,
-            )
-            gt_tangent = torch.cat(grads, dim=0).to(dtype=torch.float32)
-            image = image.squeeze(0).to(dtype=torch.float32)
-        else:
-            image = self.renderer.forward(
-                shape=shape,
-                size=factors[1],
-                orientation=factors[2],
-                floor_hue=factors[3],
-                wall_hue=factors[4],
-                object_hue=factors[5],
-            ).to(dtype=torch.float32)
-
-        if self.normalize and self.stats is not None:
-            image = (image - self.stats.mean) / self.stats.std
-            if gt_tangent is not None:
-                gt_tangent = gt_tangent / self.stats.std
-        elif not self.normalize:
-            image = image.mul(2.0).sub(1.0)
-            if gt_tangent is not None:
-                gt_tangent = gt_tangent.mul(2.0)
 
         sample = {
-            "image": image,
             "label": factors,
             "is_interpolated": torch.tensor(False),
             "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
@@ -609,20 +575,18 @@ class Differentiable3DshapesDataset(Dataset):
             "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
             "source_index": torch.tensor(global_index, dtype=torch.int64),
             "target_index": torch.tensor(global_index, dtype=torch.int64),
+            "return_grad": torch.tensor(self.return_grad),
         }
-        if gt_tangent is not None:
-            sample["gt_tangent"] = gt_tangent
         return sample
 
 
-class Differentiable3DshapesInfiniteDataset(IterableDataset):
+class Shapes3DInfiniteFactorDataset(IterableDataset):
     def __init__(
         self,
         normalize: bool = True,
         stats: Optional[DatasetStats] = None,
         seed: int = 42,
     ) -> None:
-        self.renderer = Differentiable3Dshapes()
         self.normalize = normalize
         self.stats = stats
         self.seed = int(seed)
@@ -645,22 +609,7 @@ class Differentiable3DshapesInfiniteDataset(IterableDataset):
                 dtype=torch.float32,
             )
 
-            image = self.renderer.forward(
-                shape=int(shape),
-                size=factors[1],
-                orientation=factors[2],
-                floor_hue=factors[3],
-                wall_hue=factors[4],
-                object_hue=factors[5],
-            ).to(dtype=torch.float32)
-
-            if self.normalize and self.stats is not None:
-                image = (image - self.stats.mean) / self.stats.std
-            elif not self.normalize:
-                image = image.mul(2.0).sub(1.0)
-
             yield {
-                "image": image,
                 "label": factors,
                 "is_interpolated": torch.tensor(False),
                 "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
@@ -668,6 +617,7 @@ class Differentiable3DshapesInfiniteDataset(IterableDataset):
                 "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
                 "source_index": torch.tensor(running_index, dtype=torch.int64),
                 "target_index": torch.tensor(running_index, dtype=torch.int64),
+                "return_grad": torch.tensor(False),
             }
             running_index += max(1, (worker_info.num_workers if worker_info is not None else 1))
 
@@ -689,6 +639,8 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         val_return_grad: bool = False,
     ) -> None:
         super().__init__()
+        if not torch.cuda.is_available():
+            raise RuntimeError("Differentiable3DshapesDataModule requires CUDA for batched GPU rendering.")
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.val_fraction = val_fraction
@@ -706,6 +658,69 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         self.val_dataset: Optional[Dataset] = None
         self.image_shape: Optional[tuple[int, int, int]] = None
         self.factor_dim: Optional[int] = 6
+        self._render_device = torch.device("cuda")
+        self._gpu_renderer: Optional[Differentiable3Dshapes] = None
+
+    def _get_gpu_renderer(self) -> Differentiable3Dshapes:
+        if self._gpu_renderer is None:
+            self._gpu_renderer = Differentiable3Dshapes()
+        return self._gpu_renderer
+
+    def _render_from_factors(
+        self,
+        factors: torch.Tensor,
+        return_grad: bool,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        renderer = self._get_gpu_renderer()
+        factors = factors.to(device=device, dtype=torch.float32, non_blocking=True)
+        shape = factors[:, 0].to(dtype=torch.int64)
+        size = factors[:, 1]
+        orientation = factors[:, 2]
+        floor_hue = factors[:, 3]
+        wall_hue = factors[:, 4]
+        object_hue = factors[:, 5]
+
+        if return_grad:
+            grads, images = renderer.forward(
+                shape=shape,
+                size=size,
+                orientation=orientation,
+                floor_hue=floor_hue,
+                wall_hue=wall_hue,
+                object_hue=object_hue,
+                return_grad=True,
+            )
+            images = images.to(dtype=torch.float32)
+            gt_tangent = torch.stack([grad.to(dtype=torch.float32) for grad in grads], dim=1)
+            return images, gt_tangent
+
+        images = renderer.forward(
+            shape=shape,
+            size=size,
+            orientation=orientation,
+            floor_hue=floor_hue,
+            wall_hue=wall_hue,
+            object_hue=object_hue,
+        ).to(dtype=torch.float32)
+        return images, None
+
+    def _apply_normalization(
+        self,
+        image: torch.Tensor,
+        gt_tangent: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.normalize and self.stats is not None:
+            mean = self.stats.mean.to(device=image.device, dtype=image.dtype)
+            std = self.stats.std.to(device=image.device, dtype=image.dtype)
+            image = (image - mean) / std
+            if gt_tangent is not None:
+                gt_tangent = gt_tangent / std.unsqueeze(0).unsqueeze(0)
+        elif not self.normalize:
+            image = image.mul(2.0).sub(1.0)
+            if gt_tangent is not None:
+                gt_tangent = gt_tangent.mul(2.0)
+        return image, gt_tangent
 
     def prepare_data(self) -> None:
         return
@@ -714,15 +729,15 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         if self.train_dataset is not None and self.val_dataset is not None:
             return
 
-        probe_renderer = Differentiable3Dshapes()
-        probe = probe_renderer(
-            shape=0,
-            size=torch.tensor(1.0, dtype=torch.float32),
-            orientation=torch.tensor(0.0, dtype=torch.float32),
-            floor_hue=torch.tensor(0.0, dtype=torch.float32),
-            wall_hue=torch.tensor(0.33, dtype=torch.float32),
-            object_hue=torch.tensor(0.66, dtype=torch.float32),
+        probe, _ = self._render_from_factors(
+            factors=torch.tensor(
+                [[0.0, 1.0, 0.0, 0.0, 0.33, 0.66]],
+                dtype=torch.float32,
+            ),
+            return_grad=False,
+            device=self._render_device,
         )
+        probe = probe[0]
         if probe.ndim != 3:
             raise ValueError(f"Expected renderer output shape (C,H,W), got {tuple(probe.shape)}")
         self.image_shape = (int(probe.shape[0]), int(probe.shape[1]), int(probe.shape[2]))
@@ -746,7 +761,7 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         if self.max_val_samples is not None:
             val_indices = val_indices[: min(self.max_val_samples, len(val_indices))]
 
-        raw_train_dataset = Differentiable3DshapesDataset(
+        raw_train_dataset = Shapes3DFactorDataset(
             length=self.total_samples,
             normalize=False,
             stats=None,
@@ -759,13 +774,13 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
             self.stats = self._compute_stats(raw_train_dataset)
 
         if self.infinite_train_stream:
-            self.train_dataset = Differentiable3DshapesInfiniteDataset(
+            self.train_dataset = Shapes3DInfiniteFactorDataset(
                 normalize=self.normalize,
                 stats=self.stats,
                 seed=self.seed,
             )
         else:
-            self.train_dataset = Differentiable3DshapesDataset(
+            self.train_dataset = Shapes3DFactorDataset(
                 length=self.total_samples,
                 normalize=self.normalize,
                 stats=self.stats,
@@ -774,7 +789,7 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
                 random_sampling=self.random_sampling,
                 return_grad=False,
             )
-        self.val_dataset = Differentiable3DshapesDataset(
+        self.val_dataset = Shapes3DFactorDataset(
             length=self.total_samples,
             normalize=self.normalize,
             stats=self.stats,
@@ -784,7 +799,7 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
             return_grad=self.val_return_grad,
         )
 
-    def _compute_stats(self, dataset: Differentiable3DshapesDataset) -> DatasetStats:
+    def _compute_stats(self, dataset: Shapes3DFactorDataset) -> DatasetStats:
         if self.stats_samples is not None and self.stats_samples < len(dataset):
             dataset = torch.utils.data.Subset(dataset, range(self.stats_samples))
         loader = DataLoader(
@@ -799,7 +814,11 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         channel_sq_sum = None
         pixel_count = 0
         for batch in loader:
-            images = batch["image"]
+            images, _ = self._render_from_factors(
+                factors=batch["label"],
+                return_grad=False,
+                device=self._render_device,
+            )
             batch_sum = images.sum(dim=(0, 2, 3))
             batch_sq_sum = (images**2).sum(dim=(0, 2, 3))
             if channel_sum is None:
@@ -813,7 +832,32 @@ class Differentiable3DshapesDataModule(L.LightningDataModule):
         mean = channel_sum / pixel_count
         var = channel_sq_sum / pixel_count - mean**2
         std = torch.sqrt(var.clamp_min(1e-6))
-        return DatasetStats(mean=mean[:, None, None], std=std[:, None, None])
+        return DatasetStats(
+            mean=mean[:, None, None].to("cpu"),
+            std=std[:, None, None].to("cpu"),
+        )
+
+    def on_after_batch_transfer(
+        self,
+        batch: object,
+        dataloader_idx: int,
+    ) -> object:
+        if not isinstance(batch, dict) or "label" not in batch:
+            return batch
+        factors = batch["label"]
+        return_grad = bool(batch["return_grad"].any().item()) if "return_grad" in batch else False
+        image, gt_tangent = self._render_from_factors(
+            factors=factors,
+            return_grad=return_grad,
+            device=self._render_device,
+        )
+        image, gt_tangent = self._apply_normalization(image=image, gt_tangent=gt_tangent)
+        batch["image"] = image
+        if gt_tangent is not None:
+            batch["gt_tangent"] = gt_tangent
+        if "return_grad" in batch:
+            batch.pop("return_grad")
+        return batch
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
