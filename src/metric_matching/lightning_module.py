@@ -50,6 +50,7 @@ class MetricMatchingConfig:
     preview_steps: int = 7
     preview_scale: float = 0.25
     preview_rk4_substeps: int = 8
+    validation_projection_epsilon: float | None = None
 
 
 class MetricMatchingModule(L.LightningModule):
@@ -369,12 +370,52 @@ class MetricMatchingModule(L.LightningModule):
         }
         return loss, metrics
 
+    def compute_gt_projection_error(
+        self,
+        images: torch.Tensor,
+        gt_tangent: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        # images: [B, C, H, W], gt_tangent: [B, T, C, H, W]
+        epsilon_value = (
+            (self.config.epsilon_min * self.config.epsilon_max) ** 0.5
+            if self.config.validation_projection_epsilon is None
+            else self.config.validation_projection_epsilon
+        )
+        epsilon = torch.full(
+            (images.shape[0],),
+            float(epsilon_value),
+            device=images.device,
+            dtype=images.dtype,
+        )
+        metric_basis, _ = self.forward(images, epsilon)
+        gt_count = gt_tangent.shape[1]
+
+        pred_flat = metric_basis.flatten(start_dim=2)
+        _, _, pred_vh = torch.linalg.svd(pred_flat, full_matrices=False)
+        pred_top = pred_vh[:, :gt_count]
+
+        gt_flat = gt_tangent.flatten(start_dim=2)
+        _, _, gt_vh = torch.linalg.svd(gt_flat, full_matrices=False)
+        gt_top = gt_vh[:, :gt_count]
+
+        overlap = torch.matmul(pred_top, gt_top.transpose(1, 2)).square().sum(dim=(1, 2))
+        k = torch.tensor(float(gt_count), device=images.device, dtype=images.dtype)
+        frob_sq = 2.0 * k - 2.0 * overlap
+        data_dim = float(images[0].numel())
+        return {
+            "gt_projection_error": frob_sq.mean() / data_dim,
+        }
+
     def _shared_step(self, batch: dict[str, torch.Tensor], stage: str) -> torch.Tensor:
         images = batch["image"]
         loss, metrics = self.compute_low_rank_loss(images)
         self.log(f"{stage}/loss", loss, prog_bar=True, batch_size=images.shape[0])
         for name, value in metrics.items():
             self.log(f"{stage}/{name}", value, prog_bar=False, batch_size=images.shape[0])
+        if stage == "val" and "gt_tangent" in batch:
+            projection_metrics = self.compute_gt_projection_error(images=images, gt_tangent=batch["gt_tangent"])
+            for name, value in projection_metrics.items():
+                self.log(f"{stage}/{name}", value, prog_bar=False, batch_size=images.shape[0])
         return loss
 
     def _denormalize_image(self, image: torch.Tensor) -> torch.Tensor:

@@ -14,13 +14,14 @@ import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
-from metric_matching.data import Shapes3DDataModule
+from metric_matching.data import Differentiable3DshapesDataModule, Shapes3DDataModule
 from metric_matching.lightning_module import MetricMatchingConfig, MetricMatchingModule
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Riemannian Metric Matching on 3dshapes.")
     parser.add_argument("--data-path", type=str, default="3dshapes.h5")
+    parser.add_argument("--use-differentiable-3dshapes", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-epochs", type=int, default=20)
@@ -84,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--enable-color-interpolation", action="store_true")
+    parser.add_argument("--total-samples", type=int, default=100_000)
+    parser.add_argument("--val-return-grad", action="store_true")
     parser.add_argument("--project", type=str, default="metric-matching")
     parser.add_argument("--run-name", type=str, default="3dshapes-rmm")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
@@ -100,19 +103,35 @@ def main() -> None:
     args = build_parser().parse_args()
     L.seed_everything(args.seed, workers=True)
 
-    data_module = Shapes3DDataModule(
-        data_path=args.data_path,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        val_fraction=args.val_fraction,
-        normalize=not args.disable_normalize,
-        stats_samples=args.stats_samples,
-        smoothing_sigma=args.smoothing_sigma,
-        max_train_samples=args.max_train_samples,
-        max_val_samples=args.max_val_samples,
-        enable_color_interpolation=args.enable_color_interpolation,
-        seed=args.seed,
-    )
+    if args.use_differentiable_3dshapes:
+        data_module = Differentiable3DshapesDataModule(
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            val_fraction=args.val_fraction,
+            normalize=not args.disable_normalize,
+            stats_samples=args.stats_samples,
+            total_samples=args.total_samples,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            seed=args.seed,
+            random_sampling=True,
+            infinite_train_stream=False,
+            val_return_grad=args.val_return_grad,
+        )
+    else:
+        data_module = Shapes3DDataModule(
+            data_path=args.data_path,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            val_fraction=args.val_fraction,
+            normalize=not args.disable_normalize,
+            stats_samples=args.stats_samples,
+            smoothing_sigma=args.smoothing_sigma,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            enable_color_interpolation=args.enable_color_interpolation,
+            seed=args.seed,
+        )
     data_module.prepare_data()
     data_module.setup("fit")
     if data_module.image_shape is None:
@@ -171,11 +190,26 @@ def main() -> None:
                 "image_height": height,
                 "image_width": width,
                 "torch_version": torch.__version__,
-                "dataset_path": str(Path(args.data_path).resolve()),
                 "normalize": not args.disable_normalize,
-                "smoothing_sigma": args.smoothing_sigma,
+                "use_differentiable_3dshapes": args.use_differentiable_3dshapes,
             }
         )
+        if args.use_differentiable_3dshapes:
+            logger.experiment.config.update(
+                {
+                    "total_samples": args.total_samples,
+                    "random_sampling": True,
+                    "infinite_train_stream": False,
+                    "val_return_grad": args.val_return_grad,
+                }
+            )
+        else:
+            logger.experiment.config.update(
+                {
+                    "dataset_path": str(Path(args.data_path).resolve()),
+                    "smoothing_sigma": args.smoothing_sigma,
+                }
+            )
 
     checkpoint_dir = None
     if logger is not None:

@@ -11,7 +11,9 @@ import lightning as L
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, IterableDataset, random_split
+
+from differentiable_3dshapes import Differentiable3Dshapes
 
 
 COLOR_FACTOR_INDICES = (0, 1, 2)
@@ -488,6 +490,336 @@ class Shapes3DDataModule(L.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
+
+class Differentiable3DshapesDataset(Dataset):
+    def __init__(
+        self,
+        length: int,
+        normalize: bool = True,
+        stats: Optional[DatasetStats] = None,
+        seed: int = 42,
+        indices: Optional[np.ndarray] = None,
+        random_sampling: bool = False,
+        return_grad: bool = False,
+    ) -> None:
+        if length <= 0:
+            raise ValueError(f"length must be positive, got {length}")
+        self.renderer = Differentiable3Dshapes()
+        self.length = int(length)
+        self.normalize = normalize
+        self.stats = stats
+        self.seed = int(seed)
+        self.random_sampling = random_sampling
+        self.return_grad = return_grad
+        self.indices = (
+            np.arange(self.length, dtype=np.int64)
+            if indices is None
+            else np.asarray(indices, dtype=np.int64)
+        )
+        self.factor_dim = 6
+        self._rng: Optional[np.random.Generator] = None
+
+    def __len__(self) -> int:
+        return int(self.indices.shape[0])
+
+    def _sample_factors(self, global_index: int) -> torch.Tensor:
+        if self.random_sampling:
+            if self._rng is None:
+                worker_info = torch.utils.data.get_worker_info()
+                if worker_info is None:
+                    worker_seed = self.seed
+                else:
+                    # Prefer DataLoader-provided worker seed so sequences can vary per epoch.
+                    worker_seed = int(worker_info.seed) + self.seed
+                self._rng = np.random.default_rng(worker_seed)
+            rng = self._rng
+        else:
+            rng = np.random.default_rng(self.seed + int(global_index))
+        shape = float(rng.integers(0, 4))
+        size = float(rng.uniform(0.7, 1.5))
+        orientation = float(rng.uniform(0.0, 1.0))
+        floor_hue = float(rng.uniform(0.0, 1.0))
+        wall_hue = float(rng.uniform(0.0, 1.0))
+        object_hue = float(rng.uniform(0.0, 1.0))
+        return torch.tensor(
+            [shape, size, orientation, floor_hue, wall_hue, object_hue],
+            dtype=torch.float32,
+        )
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Index {index} is out of range for dataset of length {len(self)}.")
+
+        global_index = int(self.indices[index])
+        factors = self._sample_factors(global_index)
+        shape = int(factors[0].item())
+        gt_tangent = None
+        if self.return_grad:
+            grads, image = self.renderer.forward(
+                shape=shape,
+                size=factors[1],
+                orientation=factors[2],
+                floor_hue=factors[3],
+                wall_hue=factors[4],
+                object_hue=factors[5],
+                return_grad=True,
+            )
+            gt_tangent = torch.cat(grads, dim=0).to(dtype=torch.float32)
+            image = image.squeeze(0).to(dtype=torch.float32)
+        else:
+            image = self.renderer.forward(
+                shape=shape,
+                size=factors[1],
+                orientation=factors[2],
+                floor_hue=factors[3],
+                wall_hue=factors[4],
+                object_hue=factors[5],
+            ).to(dtype=torch.float32)
+
+        if self.normalize and self.stats is not None:
+            image = (image - self.stats.mean) / self.stats.std
+            if gt_tangent is not None:
+                gt_tangent = gt_tangent / self.stats.std
+        elif not self.normalize:
+            image = image.mul(2.0).sub(1.0)
+            if gt_tangent is not None:
+                gt_tangent = gt_tangent.mul(2.0)
+
+        sample = {
+            "image": image,
+            "label": factors,
+            "is_interpolated": torch.tensor(False),
+            "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
+            "interpolation_alphas": torch.zeros(len(COLOR_FACTOR_INDICES), dtype=torch.float32),
+            "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
+            "source_index": torch.tensor(global_index, dtype=torch.int64),
+            "target_index": torch.tensor(global_index, dtype=torch.int64),
+        }
+        if gt_tangent is not None:
+            sample["gt_tangent"] = gt_tangent
+        return sample
+
+
+class Differentiable3DshapesInfiniteDataset(IterableDataset):
+    def __init__(
+        self,
+        normalize: bool = True,
+        stats: Optional[DatasetStats] = None,
+        seed: int = 42,
+    ) -> None:
+        self.renderer = Differentiable3Dshapes()
+        self.normalize = normalize
+        self.stats = stats
+        self.seed = int(seed)
+        self.factor_dim = 6
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = 0 if worker_info is None else worker_info.id
+        rng = np.random.default_rng(self.seed + worker_id * 100_003)
+        running_index = worker_id
+        while True:
+            shape = float(rng.integers(0, 4))
+            size = float(rng.uniform(0.7, 1.5))
+            orientation = float(rng.uniform(0.0, 1.0))
+            floor_hue = float(rng.uniform(0.0, 1.0))
+            wall_hue = float(rng.uniform(0.0, 1.0))
+            object_hue = float(rng.uniform(0.0, 1.0))
+            factors = torch.tensor(
+                [shape, size, orientation, floor_hue, wall_hue, object_hue],
+                dtype=torch.float32,
+            )
+
+            image = self.renderer.forward(
+                shape=int(shape),
+                size=factors[1],
+                orientation=factors[2],
+                floor_hue=factors[3],
+                wall_hue=factors[4],
+                object_hue=factors[5],
+            ).to(dtype=torch.float32)
+
+            if self.normalize and self.stats is not None:
+                image = (image - self.stats.mean) / self.stats.std
+            elif not self.normalize:
+                image = image.mul(2.0).sub(1.0)
+
+            yield {
+                "image": image,
+                "label": factors,
+                "is_interpolated": torch.tensor(False),
+                "interpolation_alpha": torch.tensor(0.0, dtype=torch.float32),
+                "interpolation_alphas": torch.zeros(len(COLOR_FACTOR_INDICES), dtype=torch.float32),
+                "interpolation_factor": torch.tensor(-1, dtype=torch.int64),
+                "source_index": torch.tensor(running_index, dtype=torch.int64),
+                "target_index": torch.tensor(running_index, dtype=torch.int64),
+            }
+            running_index += max(1, (worker_info.num_workers if worker_info is not None else 1))
+
+
+class Differentiable3DshapesDataModule(L.LightningDataModule):
+    def __init__(
+        self,
+        batch_size: int = 64,
+        num_workers: int = 4,
+        val_fraction: float = 0.05,
+        normalize: bool = True,
+        stats_samples: int = 2048,
+        total_samples: int = 100_000,
+        max_train_samples: Optional[int] = None,
+        max_val_samples: Optional[int] = None,
+        seed: int = 42,
+        random_sampling: bool = True,
+        infinite_train_stream: bool = False,
+        val_return_grad: bool = False,
+    ) -> None:
+        super().__init__()
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.val_fraction = val_fraction
+        self.normalize = normalize
+        self.stats_samples = stats_samples
+        self.total_samples = total_samples
+        self.max_train_samples = max_train_samples
+        self.max_val_samples = max_val_samples
+        self.seed = seed
+        self.random_sampling = random_sampling
+        self.infinite_train_stream = infinite_train_stream
+        self.val_return_grad = val_return_grad
+        self.stats: Optional[DatasetStats] = None
+        self.train_dataset: Optional[Dataset | IterableDataset] = None
+        self.val_dataset: Optional[Dataset] = None
+        self.image_shape: Optional[tuple[int, int, int]] = None
+        self.factor_dim: Optional[int] = 6
+
+    def prepare_data(self) -> None:
+        return
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        if self.train_dataset is not None and self.val_dataset is not None:
+            return
+
+        probe_renderer = Differentiable3Dshapes()
+        probe = probe_renderer(
+            shape=0,
+            size=torch.tensor(1.0, dtype=torch.float32),
+            orientation=torch.tensor(0.0, dtype=torch.float32),
+            floor_hue=torch.tensor(0.0, dtype=torch.float32),
+            wall_hue=torch.tensor(0.33, dtype=torch.float32),
+            object_hue=torch.tensor(0.66, dtype=torch.float32),
+        )
+        if probe.ndim != 3:
+            raise ValueError(f"Expected renderer output shape (C,H,W), got {tuple(probe.shape)}")
+        self.image_shape = (int(probe.shape[0]), int(probe.shape[1]), int(probe.shape[2]))
+
+        val_length = max(1, int(self.total_samples * self.val_fraction))
+        train_length = self.total_samples - val_length
+        if train_length <= 0:
+            raise ValueError(
+                f"total_samples={self.total_samples} and val_fraction={self.val_fraction} "
+                "produce an empty train split."
+            )
+
+        all_indices = np.arange(self.total_samples, dtype=np.int64)
+        rng = np.random.default_rng(self.seed)
+        rng.shuffle(all_indices)
+        train_indices = all_indices[:train_length]
+        val_indices = all_indices[train_length:]
+
+        if self.max_train_samples is not None:
+            train_indices = train_indices[: min(self.max_train_samples, len(train_indices))]
+        if self.max_val_samples is not None:
+            val_indices = val_indices[: min(self.max_val_samples, len(val_indices))]
+
+        raw_train_dataset = Differentiable3DshapesDataset(
+            length=self.total_samples,
+            normalize=False,
+            stats=None,
+            seed=self.seed,
+            indices=train_indices,
+            random_sampling=self.random_sampling,
+            return_grad=False,
+        )
+        if self.normalize:
+            self.stats = self._compute_stats(raw_train_dataset)
+
+        if self.infinite_train_stream:
+            self.train_dataset = Differentiable3DshapesInfiniteDataset(
+                normalize=self.normalize,
+                stats=self.stats,
+                seed=self.seed,
+            )
+        else:
+            self.train_dataset = Differentiable3DshapesDataset(
+                length=self.total_samples,
+                normalize=self.normalize,
+                stats=self.stats,
+                seed=self.seed,
+                indices=train_indices,
+                random_sampling=self.random_sampling,
+                return_grad=False,
+            )
+        self.val_dataset = Differentiable3DshapesDataset(
+            length=self.total_samples,
+            normalize=self.normalize,
+            stats=self.stats,
+            seed=self.seed,
+            indices=val_indices,
+            random_sampling=False,
+            return_grad=self.val_return_grad,
+        )
+
+    def _compute_stats(self, dataset: Differentiable3DshapesDataset) -> DatasetStats:
+        if self.stats_samples is not None and self.stats_samples < len(dataset):
+            dataset = torch.utils.data.Subset(dataset, range(self.stats_samples))
+        loader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+        channel_sum = None
+        channel_sq_sum = None
+        pixel_count = 0
+        for batch in loader:
+            images = batch["image"]
+            batch_sum = images.sum(dim=(0, 2, 3))
+            batch_sq_sum = (images**2).sum(dim=(0, 2, 3))
+            if channel_sum is None:
+                channel_sum = batch_sum
+                channel_sq_sum = batch_sq_sum
+            else:
+                channel_sum += batch_sum
+                channel_sq_sum += batch_sq_sum
+            pixel_count += images.shape[0] * images.shape[2] * images.shape[3]
+
+        mean = channel_sum / pixel_count
+        var = channel_sq_sum / pixel_count - mean**2
+        std = torch.sqrt(var.clamp_min(1e-6))
+        return DatasetStats(mean=mean[:, None, None], std=std[:, None, None])
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=not self.infinite_train_stream,
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
