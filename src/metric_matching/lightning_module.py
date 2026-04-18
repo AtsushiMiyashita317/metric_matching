@@ -7,6 +7,7 @@ from typing import Literal
 import lightning as L
 import numpy as np
 import torch
+from torch.utils.data._utils.collate import default_collate
 
 from metric_matching.data import restore_image_range
 from metric_matching.models import MetricBasisNetwork, MetricFactorNetwork, ScoreNetwork
@@ -662,6 +663,26 @@ class MetricMatchingModule(L.LightningModule):
         eigenvalues = singular_values.square()
         return eigenvectors, eigenvalues
 
+    def _collect_preview_images(self, num_samples: int) -> torch.Tensor | None:
+        if self.trainer is None:
+            return None
+        datamodule = getattr(self.trainer, "datamodule", None)
+        val_dataset = getattr(datamodule, "val_dataset", None)
+        if val_dataset is None or num_samples <= 0:
+            return None
+
+        first_sample = val_dataset[0]
+        if isinstance(first_sample, dict) and "image" in first_sample:
+            return torch.stack([val_dataset[idx]["image"] for idx in range(num_samples)], dim=0).to(self.device)
+
+        samples = [val_dataset[idx] for idx in range(num_samples)]
+        batch = default_collate(samples)
+        if hasattr(datamodule, "on_after_batch_transfer"):
+            batch = datamodule.on_after_batch_transfer(batch, dataloader_idx=0)
+        if not isinstance(batch, dict) or "image" not in batch:
+            return None
+        return batch["image"].to(self.device)
+
     def _log_vector_field_grid(self) -> None:
         if self.trainer is None or self.trainer.sanity_checking:
             return
@@ -674,9 +695,10 @@ class MetricMatchingModule(L.LightningModule):
             return
 
         num_samples = min(self.config.preview_samples, len(val_dataset))
-        samples = [val_dataset[idx]["image"] for idx in range(num_samples)]
+        normalized_batch = self._collect_preview_images(num_samples)
+        if normalized_batch is None:
+            return
         # normalized_batch: [B, C, H, W], epsilon: [B]
-        normalized_batch = torch.stack(samples, dim=0).to(self.device)
         epsilon = self._preview_epsilon_values(
             num_values=1,
             device=self.device,
@@ -733,7 +755,10 @@ class MetricMatchingModule(L.LightningModule):
             return
 
         num_epsilons = max(1, self.config.preview_samples)
-        normalized_image = val_dataset[0]["image"].unsqueeze(0).to(self.device)
+        normalized_images = self._collect_preview_images(1)
+        if normalized_images is None:
+            return
+        normalized_image = normalized_images[:1]
         epsilon = self._preview_epsilon_values(
             num_values=num_epsilons,
             device=self.device,
@@ -791,8 +816,10 @@ class MetricMatchingModule(L.LightningModule):
         if val_dataset is None or len(val_dataset) == 0:
             return
 
-        sample = val_dataset[0]
-        normalized_image = sample["image"].unsqueeze(0).to(self.device)
+        normalized_images = self._collect_preview_images(1)
+        if normalized_images is None:
+            return
+        normalized_image = normalized_images[:1]
         epsilon_value = (self.config.epsilon_min * self.config.epsilon_max) ** 0.5
         epsilon = torch.full((1,), epsilon_value, device=self.device, dtype=normalized_image.dtype)
 
